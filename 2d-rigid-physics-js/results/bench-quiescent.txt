@@ -1,0 +1,28 @@
+
+6.0 s of simulation at dt = 1/60
+
+scene                 engine    bodies   ms/step  worst ms   peak pen   mean pen  apex drop   max displ    moving
+------------------------------------------------------------------------------------------------------------------------
+houseOfCards          si            27     0.265     1.881       2.54        1.42       15.1        18.5         0
+houseOfCards          xpbd          27     0.687     1.915       4.07        0.13     1920.3      2689.2        13
+bigHouse              si            58     0.435     1.240      17.02        5.81     2475.8      3136.8        19
+bigHouse              xpbd          58     1.278     2.356       9.01        0.34     2978.9      3024.1        26
+tower                 si            14     0.047     0.712       4.02        2.21       22.8        22.9         0
+tower                 xpbd          14     0.199     0.728       0.25        0.07       12.7        71.9         9
+pyramid               si            79     0.530     1.388       2.18        1.72       15.6        15.6         0
+pyramid               xpbd          79     2.027     3.432       0.32        0.12      265.4       657.7        20
+dominoes              si            25     0.053     0.719       0.00        0.00        0.0         0.0         0
+dominoes              xpbd          25     0.451     1.200       0.00        0.00       -0.0         0.0         0
+wall                  si            66     0.452     1.538       4.05        3.19       16.1        22.8         0
+wall                  xpbd          66     1.525     2.894       0.88        0.16        5.8      2262.0        16
+friction              si             9     0.012     0.627       0.00        0.00        2.1      1365.7         0
+friction              xpbd           9     0.094     0.774       0.02        0.01        2.2      1341.6         0
+arch                  si            20     0.068     0.856       3.37        1.96       17.9        17.9         0
+arch                  xpbd          20     0.352     0.892       2.91        0.07      189.7      1772.4         9
+
+penetration / drop / displacement in mm
+
+determinism  si     houseOfCards: identical (3418121123 vs 3418121123)
+determinism  xpbd   houseOfCards: identical (2549712688 vs 2549712688)
+
+wrote results/bench-quiescent.json
