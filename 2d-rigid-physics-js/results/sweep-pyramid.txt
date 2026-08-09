@@ -1,0 +1,37 @@
+
+scene "pyramid", 8s, dt=1/60, no perturbation
+
+--- XPBD: substeps x iterations ---
+  substeps=4 it=1              collapses apex drop   2103.6 mm   max displ   4500.5 mm   pen  4.609 mm     0.554 ms/step
+  substeps=8 it=1              collapses apex drop   1981.6 mm   max displ   5786.4 mm   pen  0.523 mm     0.894 ms/step
+  substeps=12 it=1             collapses apex drop   1194.7 mm   max displ   3568.7 mm   pen  0.621 mm     1.165 ms/step
+  substeps=20 it=1             collapses apex drop    487.3 mm   max displ    831.2 mm   pen  0.258 mm     1.963 ms/step
+  substeps=40 it=1             STANDS   apex drop     11.0 mm   max displ    487.4 mm   pen  0.029 mm     3.992 ms/step
+  substeps=60 it=1             STANDS   apex drop     11.0 mm   max displ    337.0 mm   pen  0.011 mm     5.824 ms/step
+  substeps=100 it=1            STANDS   apex drop     11.0 mm   max displ    204.3 mm   pen  0.003 mm     9.900 ms/step
+  substeps=150 it=1            STANDS   apex drop     11.0 mm   max displ    133.7 mm   pen  0.002 mm    14.416 ms/step
+  substeps=200 it=1            STANDS   apex drop     11.0 mm   max displ     99.0 mm   pen  0.001 mm    19.076 ms/step
+  substeps=300 it=1            STANDS   apex drop     11.0 mm   max displ     66.1 mm   pen  0.000 mm    28.815 ms/step
+  substeps=4 it=2              collapses apex drop   2111.5 mm   max displ   5616.7 mm   pen  1.600 mm     0.454 ms/step
+  substeps=8 it=2              collapses apex drop   1527.2 mm   max displ   6442.3 mm   pen  0.642 mm     0.844 ms/step
+  substeps=12 it=2             collapses apex drop   1017.0 mm   max displ   2473.2 mm   pen  0.073 mm     1.258 ms/step
+  substeps=4 it=4              collapses apex drop   1961.5 mm   max displ   5016.4 mm   pen  0.362 mm     0.594 ms/step
+  substeps=8 it=4              collapses apex drop   1511.8 mm   max displ   4407.6 mm   pen  0.094 mm     1.044 ms/step
+  substeps=12 it=4             collapses apex drop   1511.2 mm   max displ   4043.0 mm   pen  0.083 mm     1.507 ms/step
+
+--- Sequential impulses: velocity x position iterations ---
+  velIt=1 posIt=3              collapses apex drop   1253.2 mm   max displ   2421.3 mm   pen 10.192 mm     0.426 ms/step
+  velIt=2 posIt=3              collapses apex drop    107.7 mm   max displ    241.6 mm   pen 13.290 mm     0.311 ms/step
+  velIt=4 posIt=3              collapses apex drop     53.0 mm   max displ     53.4 mm   pen  5.008 mm     0.333 ms/step
+  velIt=8 posIt=3              STANDS   apex drop     26.0 mm   max displ     26.1 mm   pen  4.502 mm     0.385 ms/step
+  velIt=16 posIt=3             STANDS   apex drop     15.6 mm   max displ     15.6 mm   pen  1.734 mm     0.533 ms/step
+  velIt=32 posIt=3             STANDS   apex drop     12.2 mm   max displ     12.2 mm   pen  0.335 mm     0.852 ms/step
+  velIt=8 posIt=0              STANDS   apex drop     25.8 mm   max displ     25.9 mm   pen  5.308 mm     0.319 ms/step
+  velIt=8 posIt=1              STANDS   apex drop     26.0 mm   max displ     26.1 mm   pen  4.502 mm     0.381 ms/step
+  velIt=8 posIt=2              STANDS   apex drop     26.0 mm   max displ     26.1 mm   pen  4.502 mm     0.387 ms/step
+  velIt=8 posIt=6              STANDS   apex drop     26.0 mm   max displ     26.1 mm   pen  4.502 mm     0.381 ms/step
+  defaults, no warm start      collapses apex drop   1606.7 mm   max displ   4379.7 mm   pen 90.566 mm     0.662 ms/step
+  defaults, no block solver    STANDS   apex drop     15.1 mm   max displ     15.1 mm   pen  1.319 mm     0.517 ms/step
+  defaults, neither            collapses apex drop   1748.4 mm   max displ   4327.3 mm   pen 98.647 mm     0.662 ms/step
+  defaults, no speculative CCD STANDS   apex drop     15.6 mm   max displ     15.6 mm   pen  1.734 mm     0.460 ms/step
+

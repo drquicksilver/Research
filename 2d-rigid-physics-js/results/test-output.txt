@@ -1,0 +1,64 @@
+
+== 1. single box comes to rest on the ground ==
+  ok    si: resting height  y=0.15000 (want 0.150)
+  ok    si: at rest  |v|=0.00000
+  ok    si: no spin  w=0.00000
+  ok    xpbd: resting height  y=0.15000 (want 0.150)
+  ok    xpbd: at rest  |v|=0.00000
+  ok    xpbd: no spin  w=0.00000
+
+== 2. two-box stack does not sink ==
+  ok    si: lower box height  y=0.15000
+  ok    si: upper box height  y=0.45000
+  ok    xpbd: lower box height  y=0.14999
+  ok    xpbd: upper box height  y=0.44998
+
+== 3. free fall: integration bias should be g*h*T/2 for effective step h ==
+  ok    si: lag = g*h*T/2  lag=81.75 mm, predicted 81.75 mm
+  ok    xpbd: lag = g*h*T/2  lag=4.09 mm, predicted 4.09 mm
+
+== 4. Coulomb friction threshold on a 25 deg ramp ==
+  ok    si: mu=0.20 slides  moved 13539.5 mm
+  ok    si: mu=0.40 slides  moved 2441.4 mm
+  ok    si: mu=0.60 holds  moved 1.0 mm
+  ok    si: mu=0.80 holds  moved 1.0 mm
+  ok    xpbd: mu=0.20 slides  moved 13270.6 mm
+  ok    xpbd: mu=0.40 slides  moved 1803.2 mm
+  ok    xpbd: mu=0.60 holds  moved 1.1 mm
+  ok    xpbd: mu=0.80 holds  moved 1.1 mm
+
+== 5. restitution: a ball bounces to roughly e^2 of its drop height ==
+  ok    si: bounce apex  apex=0.708 m (ideal 0.64)
+  ok    xpbd: bounce apex  apex=0.639 m (ideal 0.64)
+
+== 6. momentum is conserved in a head-on collision (e = 1) ==
+  ok    si: momentum  p0=0.000000 p1=0.000000
+  ok    si: bodies separated  va=-2.280 vb=2.280
+  ok    xpbd: momentum  p0=0.000000 p1=0.000000
+  ok    xpbd: bodies separated  va=-2.578 vb=2.578
+
+== 7. tunnelling threshold: fastest body a 40 mm wall still stops ==
+  ok    si: tunnelling threshold  stops up to 399.9 m/s (6665 mm of travel per 1/60 s step)
+  ok    xpbd: tunnelling threshold  stops up to 22.3 m/s (372 mm of travel per 1/60 s step)
+
+== 7b. no scene starts interpenetrated ==
+  ok    scene houseOfCards  worst initial overlap 0.000 mm
+  ok    scene bigHouse  worst initial overlap 0.000 mm
+  ok    scene tower  worst initial overlap 0.000 mm
+  ok    scene pyramid  worst initial overlap 0.000 mm
+  ok    scene dominoes  worst initial overlap 0.000 mm
+  ok    scene wall  worst initial overlap 0.000 mm
+  ok    scene friction  worst initial overlap 0.000 mm
+  ok    scene arch  worst initial overlap 0.000 mm
+
+== 8. house of cards stands unaided for 5 s (given enough solver work) ==
+  ok    si: stands  apex moved 15.1 mm, max displacement 18.5 mm, max overlap 1.43 mm
+  ok    xpbd (20 substeps, default): drifts and falls (documented)  apex moved 1897.3 mm, max displacement 2678.1 mm, max overlap 0.08 mm
+  ok    xpbd (200 substeps): stands  apex moved 19.2 mm, max displacement 33.1 mm, max overlap 0.00 mm
+
+== 9. a kicked house of cards actually collapses ==
+  ok    si: collapsed  apex dropped 1695 mm
+  ok    xpbd: collapsed  apex dropped 1889 mm
+
+41/41 checks passed
+

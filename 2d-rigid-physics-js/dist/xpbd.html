@@ -1,0 +1,2255 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>2D rigid body demo</title>
+<style>
+:root {
+  --accent: #79c7ff;
+  --bg: #12151c;
+  --panel: #191d26;
+  --line: #262c39;
+  --text: #dce4f2;
+  --muted: #8b95a8;
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body {
+  background: var(--bg); color: var(--text);
+  font: 13px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  display: flex; overflow: hidden;
+}
+#stage { flex: 1 1 auto; position: relative; min-width: 0; }
+#view { width: 100%; height: 100%; display: block; cursor: grab; touch-action: none; }
+#view:active { cursor: grabbing; }
+#overlay {
+  position: absolute; left: 14px; top: 12px; pointer-events: none;
+  text-shadow: 0 1px 3px rgba(0,0,0,0.8);
+}
+#overlay h1 { margin: 0; font-size: 15px; letter-spacing: 0.02em; color: var(--accent); }
+#overlay p { margin: 3px 0 0; max-width: 46ch; color: var(--muted); font-size: 12px; }
+#panel {
+  flex: 0 0 302px; background: var(--panel); border-left: 1px solid var(--line);
+  padding: 14px 14px 22px; overflow-y: auto;
+}
+#panel h2 {
+  font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.09em;
+  color: var(--muted); margin: 18px 0 8px; font-weight: 600;
+}
+#panel h2:first-child { margin-top: 0; }
+select, button {
+  font: inherit; color: var(--text); background: #222836;
+  border: 1px solid var(--line); border-radius: 5px; padding: 5px 8px;
+}
+button { cursor: pointer; }
+button:hover { background: #2b3242; }
+select { width: 100%; }
+.buttons { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 8px; }
+.buttons .wide { grid-column: 1 / -1; }
+.ctl { display: block; margin-bottom: 9px; font-size: 12px; }
+.ctl input[type=range] { width: 100%; accent-color: var(--accent); margin: 2px 0 0; }
+.ctl input[type=checkbox] { accent-color: var(--accent); margin-right: 7px; vertical-align: -1px; }
+.ctl-head { display: flex; justify-content: space-between; color: var(--muted); }
+.ctl-head b { color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
+#hud .row {
+  display: flex; justify-content: space-between; gap: 8px;
+  font-size: 11.5px; padding: 1.5px 0; color: var(--muted);
+}
+#hud .row b {
+  color: var(--text); font-weight: 500;
+  font-family: ui-monospace, Menlo, Consolas, monospace; font-variant-numeric: tabular-nums;
+}
+canvas.strip { width: 100%; height: 40px; display: block; margin-bottom: 5px; border-radius: 3px; }
+.hint { color: var(--muted); font-size: 11px; margin: 10px 0 0; }
+.hint kbd {
+  background: #222836; border: 1px solid var(--line); border-radius: 3px;
+  padding: 0 4px; font-family: inherit; font-size: 10.5px;
+}
+</style>
+</head>
+<body>
+<div id="stage">
+  <canvas id="view"></canvas>
+  <div id="overlay">
+    <h1><span id="engine-name"></span></h1>
+    <p id="scene-blurb"></p>
+  </div>
+</div>
+<aside id="panel">
+  <h2>Scene</h2>
+  <select id="scene"></select>
+  <div class="buttons">
+    <button id="btn-play">Pause</button>
+    <button id="btn-step">Step</button>
+    <button id="btn-reset">Reset</button>
+    <select id="speed" title="Simulation rate">
+      <option value="1">1x speed</option>
+      <option value="0.25">0.25x</option>
+      <option value="0.1">0.1x</option>
+      <option value="2">2x</option>
+    </select>
+    <button id="btn-perturb" class="wide">Perturb</button>
+  </div>
+
+  <h2>Solver — substepped XPBD</h2>
+  <div id="params"></div>
+
+  <h2>Debug draw</h2>
+  <div id="debug"></div>
+
+  <h2>Measurements</h2>
+  <div id="hud"></div>
+  <canvas class="strip" id="strip-pen"></canvas>
+  <canvas class="strip" id="strip-energy"></canvas>
+  <canvas class="strip" id="strip-cost"></canvas>
+
+  <p class="hint">
+    Drag bodies with the mouse. <kbd>Alt</kbd>+click spawns a box,
+    <kbd>Alt</kbd>+<kbd>Ctrl</kbd>+click a ball. <kbd>Shift</kbd>+drag pans,
+    scroll zooms. <kbd>Space</kbd> pause, <kbd>.</kbd> single step,
+    <kbd>R</kbd> reset, <kbd>P</kbd> perturb.
+  </p>
+</aside>
+<script>
+(function () {
+"use strict";
+// ===== src/core/math.js =====
+// Small 2D math helpers shared by both engines.
+// Vectors are plain {x, y} objects. The hot solver loops use raw scalars rather
+// than these helpers so we never allocate inside a step.
+
+const EPS = 1e-12;
+
+function v2(x = 0, y = 0) { return { x, y }; }
+function add(a, b) { return { x: a.x + b.x, y: a.y + b.y }; }
+function sub(a, b) { return { x: a.x - b.x, y: a.y - b.y }; }
+function mul(a, s) { return { x: a.x * s, y: a.y * s }; }
+function neg(a) { return { x: -a.x, y: -a.y }; }
+function dot(a, b) { return a.x * b.x + a.y * b.y; }
+// 2D "cross product": the z component of the 3D cross of two in-plane vectors.
+function cross(a, b) { return a.x * b.y - a.y * b.x; }
+// cross(scalar w, vector v) -> vector, i.e. w x v
+function crossSV(s, v) { return { x: -s * v.y, y: s * v.x }; }
+// cross(vector v, scalar w) -> vector
+function crossVS(v, s) { return { x: s * v.y, y: -s * v.x }; }
+function len(a) { return Math.hypot(a.x, a.y); }
+function lenSq(a) { return a.x * a.x + a.y * a.y; }
+function dist(a, b) { return Math.hypot(a.x - b.x, a.y - b.y); }
+
+function normalize(a) {
+  const l = Math.hypot(a.x, a.y);
+  if (l < EPS) return { x: 0, y: 0 };
+  return { x: a.x / l, y: a.y / l };
+}
+
+function clamp(x, lo, hi) { return x < lo ? lo : (x > hi ? hi : x); }
+
+/** Rotate v by angle (radians). */
+function rotate(v, a) {
+  const c = Math.cos(a), s = Math.sin(a);
+  return { x: c * v.x - s * v.y, y: s * v.x + c * v.y };
+}
+
+/** Rotate v by -angle. */
+function rotateT(v, a) {
+  const c = Math.cos(a), s = Math.sin(a);
+  return { x: c * v.x + s * v.y, y: -s * v.x + c * v.y };
+}
+
+/** Body-local point -> world point. */
+function toWorld(body, p) {
+  const c = Math.cos(body.angle), s = Math.sin(body.angle);
+  return {
+    x: body.position.x + c * p.x - s * p.y,
+    y: body.position.y + s * p.x + c * p.y,
+  };
+}
+
+/** World point -> body-local point. */
+function toLocal(body, p) {
+  const c = Math.cos(body.angle), s = Math.sin(body.angle);
+  const dx = p.x - body.position.x, dy = p.y - body.position.y;
+  return { x: c * dx + s * dy, y: -s * dx + c * dy };
+}
+
+/** Deterministic 32-bit LCG. Both engines must see identical scene noise. */
+class Rng {
+  constructor(seed = 1) { this.s = (seed >>> 0) || 1; }
+  next() {
+    // Numerical Recipes LCG constants; exact in float64.
+    this.s = (Math.imul(this.s, 1664525) + 1013904223) >>> 0;
+    return this.s / 4294967296;
+  }
+  /** Uniform in [-a, a]. */
+  sym(a) { return (this.next() * 2 - 1) * a; }
+  range(lo, hi) { return lo + this.next() * (hi - lo); }
+}
+
+// ===== src/core/body.js =====
+// Rigid bodies and convex shapes. Shared verbatim by both engines so that any
+// behavioural difference between them is attributable to the solver alone.
+
+const STATIC = 0;
+const DYNAMIC = 1;
+
+let nextBodyId = 1;
+function resetBodyIds() { nextBodyId = 1; }
+
+/**
+ * Convex polygon shape. Vertices must be counter-clockwise. They are recentred
+ * on the centroid so that body.position is always the centre of mass, which
+ * keeps the inertia terms in the solver simple (no offset coupling).
+ */
+function polygonShape(verts) {
+  const n = verts.length;
+  if (n < 3) throw new Error('polygon needs >= 3 vertices');
+
+  // Signed area and centroid via the standard triangle fan decomposition.
+  let area = 0, cx = 0, cy = 0;
+  for (let i = 0; i < n; i++) {
+    const p = verts[i], q = verts[(i + 1) % n];
+    const a = p.x * q.y - q.x * p.y;
+    area += a;
+    cx += (p.x + q.x) * a;
+    cy += (p.y + q.y) * a;
+  }
+  area *= 0.5;
+  if (area < 0) throw new Error('polygon vertices must be counter-clockwise');
+  cx /= (6 * area);
+  cy /= (6 * area);
+
+  const local = verts.map((p) => v2(p.x - cx, p.y - cy));
+
+  // Second moment of area about the centroid (per unit density).
+  let num = 0, den = 0;
+  for (let i = 0; i < n; i++) {
+    const p = local[i], q = local[(i + 1) % n];
+    const c = p.x * q.y - q.x * p.y;
+    num += c * ((p.x * p.x + p.x * q.x + q.x * q.x) + (p.y * p.y + p.y * q.y + q.y * q.y));
+    den += c;
+  }
+  const inertiaPerArea = num / (6 * den);
+
+  // Outward face normals, normal[i] belongs to edge local[i] -> local[i+1].
+  const normals = [];
+  for (let i = 0; i < n; i++) {
+    const p = local[i], q = local[(i + 1) % n];
+    const ex = q.x - p.x, ey = q.y - p.y;
+    const l = Math.hypot(ex, ey);
+    if (l < EPS) throw new Error('degenerate polygon edge');
+    normals.push(v2(ey / l, -ex / l));
+  }
+
+  let radius = 0;
+  for (const p of local) radius = Math.max(radius, Math.hypot(p.x, p.y));
+
+  return { type: 'poly', verts: local, normals, area, inertiaPerArea, radius, centroid: v2(cx, cy) };
+}
+
+function boxShape(hw, hh) {
+  return polygonShape([v2(-hw, -hh), v2(hw, -hh), v2(hw, hh), v2(-hw, hh)]);
+}
+
+function circleShape(r) {
+  return { type: 'circle', verts: null, normals: null, area: Math.PI * r * r, inertiaPerArea: 0.5 * r * r, radius: r, centroid: v2(0, 0) };
+}
+
+class Body {
+  constructor(opts = {}) {
+    this.id = nextBodyId++;
+    this.shape = opts.shape;
+    this.type = opts.type === STATIC || opts.static ? STATIC : DYNAMIC;
+
+    this.position = v2(opts.x || 0, opts.y || 0);
+    this.angle = opts.angle || 0;
+    this.linearVelocity = v2(opts.vx || 0, opts.vy || 0);
+    this.angularVelocity = opts.w || 0;
+
+    this.density = opts.density != null ? opts.density : 1;
+    this.friction = opts.friction != null ? opts.friction : 0.5;
+    // Static friction defaults to the dynamic value. The XPBD engine uses both;
+    // the sequential-impulse engine uses a single Coulomb cone as is standard.
+    this.staticFriction = opts.staticFriction != null ? opts.staticFriction : this.friction;
+    this.restitution = opts.restitution != null ? opts.restitution : 0;
+
+    this.color = opts.color || null;
+    this.label = opts.label || null;
+    // Bodies flagged `tracked` are watched by the metrics code (e.g. tower apex).
+    this.tracked = !!opts.tracked;
+
+    if (this.type === STATIC) {
+      this.mass = 0; this.invMass = 0; this.inertia = 0; this.invInertia = 0;
+    } else {
+      this.mass = this.shape.area * this.density;
+      this.invMass = 1 / this.mass;
+      this.inertia = this.mass * this.shape.inertiaPerArea;
+      this.invInertia = this.inertia > 0 ? 1 / this.inertia : 0;
+      if (opts.fixedRotation) { this.inertia = 0; this.invInertia = 0; }
+    }
+
+    // Force accumulator, cleared every step.
+    this.force = v2(0, 0);
+    this.torque = 0;
+
+    // Cached world-space geometry, refreshed by updateTransform().
+    this.worldVerts = this.shape.type === 'poly' ? this.shape.verts.map(() => v2()) : null;
+    this.worldNormals = this.shape.type === 'poly' ? this.shape.normals.map(() => v2()) : null;
+    this.aabb = { minX: 0, minY: 0, maxX: 0, maxY: 0 };
+    this.sin = 0; this.cos = 1;
+
+    // Sleep bookkeeping (used identically by both engines).
+    this.sleepTime = 0;
+    this.sleeping = false;
+
+    // Previous pose, used by the XPBD integrator for velocity recovery and for
+    // measuring per-substep tangential slip. It must start at the *current*
+    // pose: static bodies are never touched by the integrator, and a zeroed
+    // prevPose would make every static contact look like it had slid metres.
+    this.prevPosition = v2(this.position.x, this.position.y);
+    this.prevAngle = this.angle;
+
+    this.updateTransform();
+    this.initialPosition = v2(this.position.x, this.position.y);
+    this.initialAngle = this.angle;
+  }
+
+  get isStatic() { return this.type === STATIC; }
+
+  updateTransform() {
+    const c = Math.cos(this.angle), s = Math.sin(this.angle);
+    this.cos = c; this.sin = s;
+    const px = this.position.x, py = this.position.y;
+    if (this.shape.type === 'poly') {
+      const lv = this.shape.verts, ln = this.shape.normals;
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      for (let i = 0; i < lv.length; i++) {
+        const x = px + c * lv[i].x - s * lv[i].y;
+        const y = py + s * lv[i].x + c * lv[i].y;
+        this.worldVerts[i].x = x; this.worldVerts[i].y = y;
+        this.worldNormals[i].x = c * ln[i].x - s * ln[i].y;
+        this.worldNormals[i].y = s * ln[i].x + c * ln[i].y;
+        if (x < minX) minX = x; if (x > maxX) maxX = x;
+        if (y < minY) minY = y; if (y > maxY) maxY = y;
+      }
+      this.aabb.minX = minX; this.aabb.minY = minY;
+      this.aabb.maxX = maxX; this.aabb.maxY = maxY;
+    } else {
+      const r = this.shape.radius;
+      this.aabb.minX = px - r; this.aabb.maxX = px + r;
+      this.aabb.minY = py - r; this.aabb.maxY = py + r;
+    }
+  }
+
+  /** Velocity of the world-space point at offset r from the centre of mass. */
+  pointVelocity(rx, ry) {
+    return v2(this.linearVelocity.x - this.angularVelocity * ry,
+              this.linearVelocity.y + this.angularVelocity * rx);
+  }
+
+  applyImpulse(px, py, rx, ry) {
+    if (this.type === STATIC) return;
+    this.linearVelocity.x += this.invMass * px;
+    this.linearVelocity.y += this.invMass * py;
+    this.angularVelocity += this.invInertia * (rx * py - ry * px);
+  }
+
+  applyForce(fx, fy) { this.force.x += fx; this.force.y += fy; }
+
+  kineticEnergy() {
+    if (this.type === STATIC) return 0;
+    const v = this.linearVelocity;
+    return 0.5 * this.mass * (v.x * v.x + v.y * v.y) + 0.5 * this.inertia * this.angularVelocity * this.angularVelocity;
+  }
+
+  worldPoint(local) { return toWorld(this, local); }
+
+  wake() { this.sleeping = false; this.sleepTime = 0; }
+}
+
+/** Convenience factories used by the shared scenes. */
+function makeBox(x, y, hw, hh, opts = {}) {
+  return new Body(Object.assign({ shape: boxShape(hw, hh), x, y }, opts));
+}
+function makeCircle(x, y, r, opts = {}) {
+  return new Body(Object.assign({ shape: circleShape(r), x, y }, opts));
+}
+function makeStaticBox(x, y, hw, hh, opts = {}) {
+  return new Body(Object.assign({ shape: boxShape(hw, hh), x, y, type: STATIC }, opts));
+}
+
+// ===== src/core/collide.js =====
+// Narrowphase: SAT + Sutherland-Hodgman face clipping producing 2-point
+// manifolds for convex polygons, plus circle cases.
+//
+// Shared verbatim by both engines. Contact points carry a stable feature `id`
+// so the sequential-impulse engine can warm-start from the previous frame, and
+// so both engines can colour-code persistent vs new contacts in the debug view.
+//
+// Convention: manifold.normal points from A towards B, and `separation` is
+// negative when the shapes overlap.
+
+const LINEAR_SLOP = 0.005;          // allowed overlap, ~5 mm
+const SPECULATIVE_DISTANCE = 4 * LINEAR_SLOP;
+
+function createManifold() {
+  return {
+    bodyA: null,
+    bodyB: null,
+    normal: { x: 0, y: 0 },
+    // Which body owns the reference face. The XPBD engine attaches the contact
+    // frame to that body so the normal rotates with the surface that defined it.
+    refIsB: false,
+    count: 0,
+    points: [newPoint(), newPoint()],
+  };
+}
+
+function newPoint() {
+  return {
+    x: 0, y: 0,              // world contact position
+    // Anchors relative to each centre of mass, refreshed every step.
+    rax: 0, ray: 0, rbx: 0, rby: 0,
+    separation: 0,
+    id: 0,
+    // Sequential-impulse solver scratch. XPBD keeps its own per-substep
+    // contact records, so nothing here is shared between the two engines.
+    normalImpulse: 0,
+    tangentImpulse: 0,
+    normalMass: 0,
+    tangentMass: 0,
+    velocityBias: 0,
+    relativeVelocity: 0,
+    warmStarted: false,
+  };
+}
+
+function makeId(refFace, incFace, clipIndex, flip) {
+  return ((refFace & 0xff) << 24) | ((incFace & 0xff) << 16) | ((clipIndex & 0xff) << 8) | (flip ? 1 : 0);
+}
+
+/**
+ * Largest separation of polygon B from any face of polygon A.
+ * Returns {index, separation} using cached world-space geometry.
+ */
+function findMaxSeparation(A, B) {
+  const nA = A.worldNormals, vA = A.worldVerts;
+  const vB = B.worldVerts;
+  let bestIndex = 0, bestSep = -Infinity;
+  for (let i = 0; i < nA.length; i++) {
+    const nx = nA[i].x, ny = nA[i].y;
+    const vx = vA[i].x, vy = vA[i].y;
+    // Support point of B in direction -n.
+    let minDot = Infinity;
+    for (let j = 0; j < vB.length; j++) {
+      const d = nx * (vB[j].x - vx) + ny * (vB[j].y - vy);
+      if (d < minDot) minDot = d;
+    }
+    if (minDot > bestSep) { bestSep = minDot; bestIndex = i; }
+  }
+  return { index: bestIndex, separation: bestSep };
+}
+
+/** Index of the face of `inc` most anti-parallel to the reference normal. */
+function findIncidentFace(inc, nx, ny) {
+  const n = inc.worldNormals;
+  let best = 0, minDot = Infinity;
+  for (let i = 0; i < n.length; i++) {
+    const d = nx * n[i].x + ny * n[i].y;
+    if (d < minDot) { minDot = d; best = i; }
+  }
+  return best;
+}
+
+const clipA = { x: 0, y: 0, id: 0 };
+const clipB = { x: 0, y: 0, id: 0 };
+const outA = { x: 0, y: 0, id: 0 };
+const outB = { x: 0, y: 0, id: 0 };
+
+/** Clip segment (p0,p1) against the half-space dot(n, p) <= offset. */
+function clipSegment(p0, p1, nx, ny, offset, o0, o1) {
+  const d0 = nx * p0.x + ny * p0.y - offset;
+  const d1 = nx * p1.x + ny * p1.y - offset;
+  let count = 0;
+  if (d0 <= 0) { o0.x = p0.x; o0.y = p0.y; o0.id = p0.id; count = 1; }
+  if (d1 <= 0) {
+    const t = count === 0 ? o0 : o1;
+    t.x = p1.x; t.y = p1.y; t.id = p1.id; count++;
+  }
+  if ((d0 > 0) !== (d1 > 0) && count < 2) {
+    const t = d0 / (d0 - d1);
+    const dst = count === 0 ? o0 : o1;
+    dst.x = p0.x + t * (p1.x - p0.x);
+    dst.y = p0.y + t * (p1.y - p0.y);
+    // The interpolated point inherits the identity of the clipped-away vertex,
+    // which is what keeps the id stable while a face slides across an edge.
+    dst.id = d0 > 0 ? p0.id : p1.id;
+    count++;
+  }
+  return count;
+}
+
+function collidePolygons(A, B, m, maxDist) {
+  const sepA = findMaxSeparation(A, B);
+  if (sepA.separation > maxDist) return 0;
+  const sepB = findMaxSeparation(B, A);
+  if (sepB.separation > maxDist) return 0;
+
+  let ref, inc, refIndex, flip;
+  // Bias towards keeping A as the reference face to reduce frame-to-frame
+  // flip-flopping between two nearly equal axes (which would destroy warm starts).
+  if (sepB.separation > sepA.separation + 0.1 * LINEAR_SLOP) {
+    ref = B; inc = A; refIndex = sepB.index; flip = true;
+  } else {
+    ref = A; inc = B; refIndex = sepA.index; flip = false;
+  }
+
+  const rn = ref.worldNormals[refIndex];
+  const nx = rn.x, ny = rn.y;
+  const rv = ref.worldVerts;
+  const i1 = refIndex, i2 = (refIndex + 1) % rv.length;
+  const r1 = rv[i1], r2 = rv[i2];
+  // Reference face tangent, pointing from r1 to r2. Face normals are built as
+  // n = perp(edge) = (ey, -ex)/|e|, so the edge direction is (-ny, nx). Getting
+  // this sign wrong swaps the two clip planes and every manifold comes back empty.
+  const tx = -ny, ty = nx;
+
+  const incIndex = findIncidentFace(inc, nx, ny);
+  const iv = inc.worldVerts;
+  const j1 = incIndex, j2 = (incIndex + 1) % iv.length;
+  clipA.x = iv[j1].x; clipA.y = iv[j1].y; clipA.id = 0;
+  clipB.x = iv[j2].x; clipB.y = iv[j2].y; clipB.id = 1;
+
+  // Clip against the two side planes of the reference face.
+  const lower = tx * r1.x + ty * r1.y;
+  const upper = tx * r2.x + ty * r2.y;
+  let n1 = clipSegment(clipA, clipB, -tx, -ty, -lower, outA, outB);
+  if (n1 < 2) return 0;
+  clipA.x = outA.x; clipA.y = outA.y; clipA.id = outA.id;
+  clipB.x = outB.x; clipB.y = outB.y; clipB.id = outB.id;
+  n1 = clipSegment(clipA, clipB, tx, ty, upper, outA, outB);
+  if (n1 < 2) return 0;
+
+  const refOffset = nx * r1.x + ny * r1.y;
+  let count = 0;
+  const src = [outA, outB];
+  for (let k = 0; k < 2; k++) {
+    const s = nx * src[k].x + ny * src[k].y - refOffset;
+    if (s <= maxDist) {
+      const p = m.points[count];
+      // Report the point midway between the two surfaces. Using the same world
+      // point for both bodies keeps the impulse arms consistent.
+      p.x = src[k].x - 0.5 * s * nx;
+      p.y = src[k].y - 0.5 * s * ny;
+      p.separation = s;
+      p.id = makeId(refIndex, incIndex, src[k].id, flip);
+      count++;
+    }
+  }
+  if (count === 0) return 0;
+
+  if (flip) { m.normal.x = -nx; m.normal.y = -ny; }
+  else { m.normal.x = nx; m.normal.y = ny; }
+  m.refIsB = flip;
+  return count;
+}
+
+function collideCircles(A, B, m, maxDist) {
+  const dx = B.position.x - A.position.x;
+  const dy = B.position.y - A.position.y;
+  const rSum = A.shape.radius + B.shape.radius;
+  const d = Math.hypot(dx, dy);
+  const sep = d - rSum;
+  if (sep > maxDist) return 0;
+  m.refIsB = false;
+  let nx, ny;
+  if (d > 1e-9) { nx = dx / d; ny = dy / d; } else { nx = 0; ny = 1; }
+  m.normal.x = nx; m.normal.y = ny;
+  const p = m.points[0];
+  const ax = A.position.x + nx * A.shape.radius;
+  const bx = B.position.x - nx * B.shape.radius;
+  const ay = A.position.y + ny * A.shape.radius;
+  const by = B.position.y - ny * B.shape.radius;
+  p.x = 0.5 * (ax + bx); p.y = 0.5 * (ay + by);
+  p.separation = sep;
+  p.id = 0;
+  return 1;
+}
+
+/** Polygon A vs circle B. Normal points from the polygon towards the circle. */
+function collidePolygonCircle(A, B, m, maxDist) {
+  const c = B.position, r = B.shape.radius;
+  const vA = A.worldVerts, nA = A.worldNormals;
+  const n = vA.length;
+
+  let bestIndex = 0, bestSep = -Infinity;
+  for (let i = 0; i < n; i++) {
+    const s = nA[i].x * (c.x - vA[i].x) + nA[i].y * (c.y - vA[i].y);
+    if (s > bestSep) { bestSep = s; bestIndex = i; }
+  }
+  if (bestSep > r + maxDist) return 0;
+  m.refIsB = false;
+
+  const i1 = bestIndex, i2 = (bestIndex + 1) % n;
+  const v1 = vA[i1], v2 = vA[i2];
+  let nx, ny, sep;
+
+  if (bestSep < 1e-9) {
+    // Centre is inside the polygon: use the least-penetrating face.
+    nx = nA[bestIndex].x; ny = nA[bestIndex].y;
+    sep = bestSep - r;
+  } else {
+    // Voronoi region test against the best face's endpoints.
+    const ex = v2.x - v1.x, ey = v2.y - v1.y;
+    const u = ((c.x - v1.x) * ex + (c.y - v1.y) * ey) / (ex * ex + ey * ey);
+    let px, py;
+    if (u <= 0) { px = v1.x; py = v1.y; }
+    else if (u >= 1) { px = v2.x; py = v2.y; }
+    else { px = v1.x + u * ex; py = v1.y + u * ey; }
+    const dx = c.x - px, dy = c.y - py;
+    const d = Math.hypot(dx, dy);
+    if (d > 1e-9) { nx = dx / d; ny = dy / d; } else { nx = nA[bestIndex].x; ny = nA[bestIndex].y; }
+    sep = d - r;
+    if (sep > maxDist) return 0;
+  }
+
+  m.normal.x = nx; m.normal.y = ny;
+  const p = m.points[0];
+  p.x = c.x - nx * (r + 0.5 * sep);
+  p.y = c.y - ny * (r + 0.5 * sep);
+  p.separation = sep;
+  p.id = bestIndex;
+  return 1;
+}
+
+/**
+ * Fill `m` with the contact manifold between A and B.
+ * Returns the number of contact points (0, 1 or 2). `m.bodyA`/`m.bodyB` are set
+ * so the normal always points from bodyA to bodyB.
+ *
+ * `maxDist` is how far apart the surfaces may be and still report a contact.
+ * The sequential-impulse engine widens it by the pair's closing distance over
+ * the step, which combined with the speculative velocity bias stops moderately
+ * fast bodies at the surface instead of letting them pass through it.
+ */
+function collide(A, B, m, maxDist = SPECULATIVE_DISTANCE) {
+  const ta = A.shape.type, tb = B.shape.type;
+  let count;
+  if (ta === 'poly' && tb === 'poly') {
+    m.bodyA = A; m.bodyB = B;
+    count = collidePolygons(A, B, m, maxDist);
+  } else if (ta === 'circle' && tb === 'circle') {
+    m.bodyA = A; m.bodyB = B;
+    count = collideCircles(A, B, m, maxDist);
+  } else if (ta === 'poly') {
+    m.bodyA = A; m.bodyB = B;
+    count = collidePolygonCircle(A, B, m, maxDist);
+  } else {
+    // Circle vs polygon: swap so the polygon is the reference, then flip.
+    m.bodyA = B; m.bodyB = A;
+    count = collidePolygonCircle(B, A, m, maxDist);
+  }
+  m.count = count;
+  return count;
+}
+
+/** Refresh the contact anchors from the current body poses. */
+function updateAnchors(m) {
+  const A = m.bodyA, B = m.bodyB;
+  for (let i = 0; i < m.count; i++) {
+    const p = m.points[i];
+    p.rax = p.x - A.position.x; p.ray = p.y - A.position.y;
+    p.rbx = p.x - B.position.x; p.rby = p.y - B.position.y;
+  }
+}
+
+// ===== src/core/broadphase.js =====
+// Sweep-and-prune broadphase on the x axis.
+//
+// Bodies are kept in a persistently sorted array and re-sorted with insertion
+// sort each frame, which is close to O(n) given frame-to-frame coherence. Pairs
+// are reported with the lower body id first so the pair key is stable, which
+// matters for warm starting.
+
+class Broadphase {
+  constructor() {
+    this.sorted = [];
+    this.pairs = [];
+    this.pairCount = 0;
+    this.margin = 0;   // constant AABB inflation
+    // When set, each body's AABB is additionally inflated by dt*|v| so that a
+    // fast body's pair is reported before it has already passed through.
+    this.motionDt = 0;
+  }
+
+  /**
+   * Drop the persistent ordering. MUST be called whenever the world's body set
+   * changes: the sorted array holds body references, and a length check alone
+   * is not enough — replacing a scene with another of the same size would
+   * otherwise leave the broadphase simulating the previous scene's bodies while
+   * the renderer drew the new ones.
+   */
+  reset() { this.sorted.length = 0; }
+
+  /** @param {Body[]} bodies */
+  update(bodies) {
+    if (this.sorted.length !== bodies.length) this.sorted = bodies.slice();
+
+    const arr = this.sorted;
+    // Insertion sort by AABB min x (nearly sorted from the previous frame).
+    for (let i = 1; i < arr.length; i++) {
+      const b = arr[i];
+      const key = b.aabb.minX;
+      let j = i - 1;
+      while (j >= 0 && arr[j].aabb.minX > key) { arr[j + 1] = arr[j]; j--; }
+      arr[j + 1] = b;
+    }
+
+    const base = this.margin, mdt = this.motionDt;
+    // Sorting uses the un-inflated min x, so the sweep must terminate on the
+    // widest possible inflation rather than each body's own.
+    let maxMotion = 0;
+    if (mdt > 0) {
+      for (const b of arr) {
+        const v = mdt * Math.hypot(b.linearVelocity.x, b.linearVelocity.y);
+        if (v > maxMotion) maxMotion = v;
+      }
+    }
+    this.pairCount = 0;
+    const pairs = this.pairs;
+    for (let i = 0; i < arr.length; i++) {
+      const a = arr[i];
+      const m = base + (mdt > 0 ? mdt * Math.hypot(a.linearVelocity.x, a.linearVelocity.y) : 0);
+      const aMaxX = a.aabb.maxX + m;
+      const aMinY = a.aabb.minY - m, aMaxY = a.aabb.maxY + m;
+      const aStatic = a.isStatic;
+      for (let j = i + 1; j < arr.length; j++) {
+        const b = arr[j];
+        if (b.aabb.minX - base - maxMotion > aMaxX) break;   // sweep can stop here
+        if (aStatic && b.isStatic) continue;
+        if (a.sleeping && b.sleeping) continue;
+        if (a.sleeping && b.isStatic) continue;
+        if (b.sleeping && aStatic) continue;
+        const mb = base + (mdt > 0 ? mdt * Math.hypot(b.linearVelocity.x, b.linearVelocity.y) : 0);
+        if (b.aabb.maxX + mb < a.aabb.minX - m) continue;
+        if (b.aabb.maxY + mb < aMinY || b.aabb.minY - mb > aMaxY) continue;
+        const p = pairs[this.pairCount] || (pairs[this.pairCount] = { a: null, b: null, key: 0 });
+        if (a.id < b.id) { p.a = a; p.b = b; } else { p.a = b; p.b = a; }
+        // Pair key: ids are < 2^20 in every scene we build, so this is exact.
+        p.key = p.a.id * 1048576 + p.b.id;
+        this.pairCount++;
+      }
+    }
+    return this.pairCount;
+  }
+}
+
+// ===== src/core/sleep.js =====
+// Island detection and sleeping. Shared by both engines so that the sleep
+// behaviour never becomes a confounding variable in the comparison.
+//
+// Bodies are grouped into islands by union-find over the active contact graph.
+// An island sleeps only when *every* dynamic body in it has been below the
+// velocity thresholds for `sleepTime` seconds; otherwise one twitching card at
+// the top of a tower would leave the rest of the structure frozen underneath it.
+
+const SLEEP_LINEAR = 0.04;    // m/s
+const SLEEP_ANGULAR = 0.12;   // rad/s
+const SLEEP_TIME = 0.5;       // s below threshold before sleeping
+
+class SleepManager {
+  constructor() {
+    this.parent = new Map();
+    this.canSleep = new Map();
+  }
+
+  find(x) {
+    const p = this.parent;
+    let r = x;
+    while (p.get(r) !== r) r = p.get(r);
+    while (p.get(x) !== r) { const n = p.get(x); p.set(x, r); x = n; }
+    return r;
+  }
+
+  union(a, b) {
+    const ra = this.find(a), rb = this.find(b);
+    if (ra !== rb) this.parent.set(ra, rb);
+  }
+
+  /**
+   * @param bodies    all bodies in the world
+   * @param contacts  iterable of {bodyA, bodyB} that are actually touching
+   * @param dt        step time
+   * @returns number of sleeping dynamic bodies
+   */
+  update(bodies, contacts, dt) {
+    this.parent.clear();
+    this.canSleep.clear();
+    for (const b of bodies) if (!b.isStatic) this.parent.set(b.id, b.id);
+
+    for (const c of contacts) {
+      const a = c.bodyA, b = c.bodyB;
+      if (a.isStatic || b.isStatic) continue;
+      this.union(a.id, b.id);
+    }
+
+    // Per-body sleep timer.
+    for (const b of bodies) {
+      if (b.isStatic) continue;
+      const v = b.linearVelocity;
+      const quiet = (v.x * v.x + v.y * v.y) < SLEEP_LINEAR * SLEEP_LINEAR &&
+                    Math.abs(b.angularVelocity) < SLEEP_ANGULAR;
+      b.sleepTime = quiet ? b.sleepTime + dt : 0;
+    }
+
+    // An island can sleep only if every member can.
+    for (const b of bodies) {
+      if (b.isStatic) continue;
+      const root = this.find(b.id);
+      const ok = b.sleepTime >= SLEEP_TIME;
+      if (!this.canSleep.has(root)) this.canSleep.set(root, ok);
+      else if (!ok) this.canSleep.set(root, false);
+    }
+
+    let sleeping = 0;
+    for (const b of bodies) {
+      if (b.isStatic) continue;
+      const ok = this.canSleep.get(this.find(b.id));
+      if (ok) {
+        b.sleeping = true;
+        b.linearVelocity.x = 0; b.linearVelocity.y = 0; b.angularVelocity = 0;
+        sleeping++;
+      } else {
+        b.sleeping = false;
+      }
+    }
+    return sleeping;
+  }
+
+  /** Wake everything (used when the user drags, spawns or perturbs). */
+  static wakeAll(bodies) { for (const b of bodies) { b.sleeping = false; b.sleepTime = 0; } }
+}
+
+/**
+ * Safety clamp on per-step motion. Without it a single bad contact can throw a
+ * body across the world and the broadphase misses everything on the way.
+ */
+const MAX_TRANSLATION = 2.0;    // metres per step
+const MAX_ROTATION = 0.5 * Math.PI; // radians per step
+
+function clampMotion(b, dt) {
+  const v = b.linearVelocity;
+  const t = dt * Math.hypot(v.x, v.y);
+  if (t > MAX_TRANSLATION) {
+    const s = MAX_TRANSLATION / t;
+    v.x *= s; v.y *= s;
+  }
+  const r = dt * Math.abs(b.angularVelocity);
+  if (r > MAX_ROTATION) b.angularVelocity *= MAX_ROTATION / r;
+}
+
+// ===== src/engines/xpbd.js =====
+// ---------------------------------------------------------------------------
+// Approach 2: Substepped Extended Position Based Dynamics (XPBD)
+// ---------------------------------------------------------------------------
+//
+// After Müller, Macklin, Chentanez, Jeschke & Kim, "Detailed Rigid Body
+// Simulation with Extended Position Based Dynamics" (SCA 2020), reduced to 2D.
+//
+// Per visual frame with h = dt / substeps:
+//
+//   collect broadphase pairs once (AABBs inflated so they stay valid all frame)
+//   for each substep:
+//     save pose; v += h*g; integrate pose explicitly
+//     build contacts
+//     solve POSITIONS: non-penetration, then static friction
+//     recover velocities by finite difference: v = (x - x_prev)/h
+//     solve VELOCITIES: dynamic friction, then restitution
+//
+// The central claim of the paper is that N substeps x 1 iteration beats
+// 1 step x N iterations for the same total work. The explicit integration
+// between iterations keeps re-linearising the problem, so information
+// propagates along a long contact chain across substeps instead of having to
+// travel the whole chain inside one linear solve — which is exactly the failure
+// mode of Gauss-Seidel on a tall stack.
+//
+// The other property that matters for a house of cards: friction is applied at
+// the POSITION level. Static friction here means "undo the tangential slip that
+// happened during this substep", which genuinely pins contacts rather than only
+// damping their relative velocity.
+//
+// Contacts are stored as a pair of local anchors (the surface point on each
+// body) plus the contact normal in the reference body's frame. Everything is
+// then re-derived from the live poses, so corrections made by one constraint
+// are immediately visible to the next — the defining property of PBD.
+//
+// This file is the ONLY thing that differs from the sequential-impulse build.
+
+
+
+class ContactRec {
+  constructor() {
+    this.A = null; this.B = null; this.ref = null;
+    this.laAx = 0; this.laAy = 0;    // surface anchor on A, A's local frame
+    this.laBx = 0; this.laBy = 0;    // surface anchor on B, B's local frame
+    this.lnx = 0; this.lny = 0;      // contact normal in ref body's local frame
+    this.pax0 = 0; this.pay0 = 0;    // anchor world positions at substep start
+    this.pbx0 = 0; this.pby0 = 0;
+    this.nx = 0; this.ny = 0;        // last evaluated world normal (debug/vel pass)
+    this.rax = 0; this.ray = 0;      // last evaluated arms
+    this.rbx = 0; this.rby = 0;
+    this.wx = 0; this.wy = 0;        // last evaluated world contact point
+    this.d = 0;                      // last evaluated penetration depth
+    this.lambdaN = 0;
+    this.lambdaT = 0;
+    this.vnPrev = 0;
+    this.muS = 0; this.muD = 0; this.restitution = 0;
+  }
+}
+
+class World {
+  constructor(opts = {}) {
+    this.name = 'Substepped XPBD';
+    this.bodies = [];
+    this.gravity = { x: 0, y: opts.gravity != null ? opts.gravity : -9.81 };
+
+    // 20 is the range the XPBD paper works in. See README: this scene class
+    // needs far more than that to hold a marginal structure indefinitely, and
+    // the slider goes to 100 so that convergence is visible interactively.
+    this.substeps = opts.substeps != null ? opts.substeps : 20;
+    this.iterations = opts.iterations != null ? opts.iterations : 1;
+    // Compliance in m/N. 0 = perfectly rigid contacts. Exposed because it is
+    // XPBD's headline feature: stiffness is a material property, independent of
+    // substep count (unlike a PBD stiffness parameter, which is not).
+    this.compliance = opts.compliance != null ? opts.compliance : 0;
+    // Cap on how fast a contact may push overlapping bodies apart. XPBD turns
+    // every positional correction straight into velocity (v = (x - x_prev)/h),
+    // so without this a body that starts 40 mm inside another is ejected at
+    // 40mm/h = 29 m/s. The effective cap is max(this, |approach speed|), so a
+    // genuine fast impact is never damped, and a resting contact — whose
+    // per-substep depth is ~g*h^2 — never reaches it. Not in the original
+    // paper; standard in production XPBD implementations.
+    this.maxRecoverySpeed = opts.maxRecoverySpeed != null ? opts.maxRecoverySpeed : 3.0;
+    this.allowSleep = !!opts.allowSleep;
+
+    this.broadphase = new Broadphase();
+    this.broadphase.margin = 0.05;
+    this.sleepManager = new SleepManager();
+    this.manifold = createManifold();
+
+    this.pool = [];
+    this.contacts = [];
+    this.sleepPairs = [];
+    this.time = 0;
+
+    this.stats = {
+      bodies: 0, contacts: 0, points: 0, sleeping: 0,
+      maxPenetration: 0, avgPenetration: 0, energy: 0,
+      broadMs: 0, narrowMs: 0, solveMs: 0, positionMs: 0, totalMs: 0,
+      substeps: this.substeps, iterations: this.iterations,
+    };
+  }
+
+  static get params() {
+    return [
+      { key: 'substeps', label: 'Substeps / frame', min: 1, max: 40, step: 1 },
+      { key: 'iterations', label: 'Iterations / substep', min: 1, max: 10, step: 1 },
+      { key: 'compliance', label: 'Contact compliance', min: 0, max: 0.0002, step: 0.000005 },
+      { key: 'maxRecoverySpeed', label: 'Max recovery speed (m/s)', min: 0.25, max: 30, step: 0.25 },
+    ];
+  }
+
+  addBody(b) { this.bodies.push(b); this.broadphase.reset(); return b; }
+  removeBody(b) { const i = this.bodies.indexOf(b); if (i >= 0) this.bodies.splice(i, 1); this.broadphase.reset(); }
+  clear() { this.bodies.length = 0; this.contacts.length = 0; this.broadphase.reset(); this.time = 0; }
+  wakeAll() { SleepManager.wakeAll(this.bodies); }
+
+  step(dt) {
+    if (dt <= 0) return;
+    const t0 = now();
+    this.time += dt;
+    const n = Math.max(1, this.substeps | 0);
+    const h = dt / n;
+
+    for (const b of this.bodies) b.updateTransform();
+    const tb0 = now();
+    const nPairs = this.broadphase.update(this.bodies);
+    const tb1 = now();
+
+    let narrowMs = 0, solveMs = 0;
+    let list = this.contacts;
+    for (let s = 0; s < n; s++) {
+      this.integrate(h);
+
+      const tn0 = now();
+      list = this.buildContacts(nPairs);
+      narrowMs += now() - tn0;
+
+      const ts0 = now();
+      for (let it = 0; it < this.iterations; it++) this.solvePositions(list, h);
+      this.recoverVelocities(h);
+      this.solveVelocities(list, h);
+      solveMs += now() - ts0;
+    }
+    this.contacts = list;
+
+    for (const b of this.bodies) b.updateTransform();
+
+    if (this.allowSleep) {
+      this.sleepPairs.length = 0;
+      for (const c of list) this.sleepPairs.push({ bodyA: c.A, bodyB: c.B });
+      this.stats.sleeping = this.sleepManager.update(this.bodies, this.sleepPairs, dt);
+    } else {
+      this.stats.sleeping = 0;
+      for (const b of this.bodies) b.sleeping = false;
+    }
+
+    // Constraint error reported is the residual after the final substep.
+    let maxPen = 0, sumPen = 0, points = 0, energy = 0;
+    for (const c of list) {
+      const d = this.evaluateDepth(c);
+      points++;
+      if (d > 0) { sumPen += d; if (d > maxPen) maxPen = d; }
+    }
+    for (const b of this.bodies) energy += b.kineticEnergy();
+
+    const st = this.stats;
+    st.bodies = this.bodies.length;
+    st.contacts = list.length;
+    st.points = points;
+    st.maxPenetration = maxPen;
+    st.avgPenetration = points ? sumPen / points : 0;
+    st.energy = energy;
+    st.broadMs = tb1 - tb0;
+    st.narrowMs = narrowMs;
+    st.solveMs = solveMs;
+    st.positionMs = 0;
+    st.totalMs = now() - t0;
+    st.substeps = n;
+    st.iterations = this.iterations;
+  }
+
+  // -- substep stages --------------------------------------------------------
+
+  /** Explicit ("quasi-explicit") position integration. */
+  integrate(h) {
+    const g = this.gravity;
+    for (const b of this.bodies) {
+      if (b.isStatic || b.sleeping) continue;
+      b.prevPosition.x = b.position.x;
+      b.prevPosition.y = b.position.y;
+      b.prevAngle = b.angle;
+
+      b.linearVelocity.x += h * (g.x + b.invMass * b.force.x);
+      b.linearVelocity.y += h * (g.y + b.invMass * b.force.y);
+      b.angularVelocity += h * b.invInertia * b.torque;
+      clampMotion(b, h);
+
+      b.position.x += h * b.linearVelocity.x;
+      b.position.y += h * b.linearVelocity.y;
+      b.angle += h * b.angularVelocity;
+      b.updateTransform();
+    }
+    for (const b of this.bodies) { b.force.x = 0; b.force.y = 0; b.torque = 0; }
+  }
+
+  alloc(i) {
+    let c = this.pool[i];
+    if (!c) { c = new ContactRec(); this.pool[i] = c; }
+    return c;
+  }
+
+  /** Full narrowphase for this substep. */
+  buildContacts(nPairs) {
+    const pairs = this.broadphase.pairs;
+    const m = this.manifold;
+    const out = [];
+    let idx = 0;
+    for (let i = 0; i < nPairs; i++) {
+      const p = pairs[i];
+      if (!collide(p.a, p.b, m)) continue;
+      const A = m.bodyA, B = m.bodyB;
+      const ref = m.refIsB ? B : A;
+      const nx = m.normal.x, ny = m.normal.y;
+      const muS = Math.sqrt(A.staticFriction * B.staticFriction);
+      const muD = Math.sqrt(A.friction * B.friction);
+      const rest = Math.max(A.restitution, B.restitution);
+      for (let k = 0; k < m.count; k++) {
+        const mp = m.points[k];
+        // XPBD acts on real overlap only; separated pairs simply have no
+        // constraint this substep. With h ~ 1ms the gap cannot be missed.
+        if (mp.separation > 0) continue;
+        const c = this.alloc(idx++);
+        setAnchors(c, A, B, ref, nx, ny, mp.x, mp.y, mp.separation);
+        c.muS = muS; c.muD = muD; c.restitution = rest;
+        this.beginContact(c);
+        out.push(c);
+      }
+    }
+    return out;
+  }
+
+  /** Reset per-substep accumulators and snapshot the pre-solve state. */
+  beginContact(c) {
+    const A = c.A, B = c.B;
+    c.lambdaN = 0; c.lambdaT = 0;
+    this.evaluateDepth(c);   // fills nx/ny, arms, wx/wy, d
+
+    // Anchor world positions at the start of this substep (before the position
+    // solve), which static friction compares against.
+    const ca = Math.cos(A.prevAngle), sa = Math.sin(A.prevAngle);
+    c.pax0 = A.prevPosition.x + ca * c.laAx - sa * c.laAy;
+    c.pay0 = A.prevPosition.y + sa * c.laAx + ca * c.laAy;
+    const cb = Math.cos(B.prevAngle), sb = Math.sin(B.prevAngle);
+    c.pbx0 = B.prevPosition.x + cb * c.laBx - sb * c.laBy;
+    c.pby0 = B.prevPosition.y + sb * c.laBx + cb * c.laBy;
+
+    // Approach speed before the position solve, kept for restitution.
+    const vax = A.linearVelocity.x - A.angularVelocity * c.ray;
+    const vay = A.linearVelocity.y + A.angularVelocity * c.rax;
+    const vbx = B.linearVelocity.x - B.angularVelocity * c.rby;
+    const vby = B.linearVelocity.y + B.angularVelocity * c.rbx;
+    c.vnPrev = (vax - vbx) * c.nx + (vay - vby) * c.ny;
+  }
+
+  /**
+   * Re-derive normal, arms and penetration depth from the current poses.
+   * Penetration d = (pA - pB) . n, positive when the surfaces have crossed.
+   */
+  evaluateDepth(c) {
+    const A = c.A, B = c.B, R = c.ref;
+    const cr = Math.cos(R.angle), sr = Math.sin(R.angle);
+    const nx = cr * c.lnx - sr * c.lny;
+    const ny = sr * c.lnx + cr * c.lny;
+    const ca = Math.cos(A.angle), sa = Math.sin(A.angle);
+    const rax = ca * c.laAx - sa * c.laAy, ray = sa * c.laAx + ca * c.laAy;
+    const cb = Math.cos(B.angle), sb = Math.sin(B.angle);
+    const rbx = cb * c.laBx - sb * c.laBy, rby = sb * c.laBx + cb * c.laBy;
+    const pax = A.position.x + rax, pay = A.position.y + ray;
+    const pbx = B.position.x + rbx, pby = B.position.y + rby;
+    c.nx = nx; c.ny = ny;
+    c.rax = rax; c.ray = ray; c.rbx = rbx; c.rby = rby;
+    c.wx = 0.5 * (pax + pbx); c.wy = 0.5 * (pay + pby);
+    c.pax = pax; c.pay = pay; c.pbx = pbx; c.pby = pby;
+    c.d = (pax - pbx) * nx + (pay - pby) * ny;
+    return c.d;
+  }
+
+  /**
+   * One iteration of positional projection.
+   *
+   *   non-penetration: dLambda = (C - alphaTilde*lambda) / (w_A + w_B + alphaTilde)
+   *   static friction: cancel this substep's tangential slip, capped by
+   *                    lambda_t <= mu_s * lambda_n  (Coulomb cone at the
+   *                    position level)
+   */
+  solvePositions(list, h) {
+    const alphaTilde = this.compliance / (h * h);
+    for (const c of list) {
+      const A = c.A, B = c.B;
+      const d = this.evaluateDepth(c);
+      if (d <= 0) continue;
+      const nx = c.nx, ny = c.ny;
+      const rax = c.rax, ray = c.ray, rbx = c.rbx, rby = c.rby;
+
+      const w = genInvMass(A, rax, ray, nx, ny) + genInvMass(B, rbx, rby, nx, ny);
+      if (w <= 0) continue;
+      const maxDepth = Math.max(this.maxRecoverySpeed, Math.abs(c.vnPrev)) * h;
+      const dEff = d > maxDepth ? maxDepth : d;
+      let dLambda = (dEff - alphaTilde * c.lambdaN) / (w + alphaTilde);
+      if (dLambda <= 0) continue;
+      c.lambdaN += dLambda;
+      // Push A along -n and B along +n.
+      applyPositional(A, B, rax, ray, rbx, rby, -nx, -ny, dLambda);
+
+      if (c.muS <= 0) continue;
+
+      // --- static friction ---
+      // Recompute anchors after the normal push, then measure how far the two
+      // contact points have slid past each other during this substep.
+      this.evaluateDepth(c);
+      let dx = (c.pax - c.pax0) - (c.pbx - c.pbx0);
+      let dy = (c.pay - c.pay0) - (c.pby - c.pby0);
+      const dn = dx * c.nx + dy * c.ny;
+      dx -= dn * c.nx; dy -= dn * c.ny;
+      const slip = Math.hypot(dx, dy);
+      if (slip < 1e-11) continue;
+      const tx = dx / slip, ty = dy / slip;
+      const wt = genInvMass(A, c.rax, c.ray, tx, ty) + genInvMass(B, c.rbx, c.rby, tx, ty);
+      if (wt <= 0) continue;
+      let dLambdaT = slip / wt;
+      const maxT = c.muS * c.lambdaN;
+      if (c.lambdaT + dLambdaT > maxT) dLambdaT = maxT - c.lambdaT;
+      if (dLambdaT <= 0) continue;
+      c.lambdaT += dLambdaT;
+      applyPositional(A, B, c.rax, c.ray, c.rbx, c.rby, -tx, -ty, dLambdaT);
+    }
+  }
+
+  /** v = (x - x_prev)/h. Position corrections reappear here as velocity. */
+  recoverVelocities(h) {
+    const inv = 1 / h;
+    for (const b of this.bodies) {
+      if (b.isStatic || b.sleeping) continue;
+      b.linearVelocity.x = (b.position.x - b.prevPosition.x) * inv;
+      b.linearVelocity.y = (b.position.y - b.prevPosition.y) * inv;
+      b.angularVelocity = (b.angle - b.prevAngle) * inv;
+    }
+  }
+
+  /** Dynamic friction and restitution as velocity-level impulses. */
+  solveVelocities(list, h) {
+    const gMag = Math.hypot(this.gravity.x, this.gravity.y);
+    for (const c of list) {
+      if (c.lambdaN <= 0) continue;
+      const A = c.A, B = c.B;
+      const rax = c.rax, ray = c.ray, rbx = c.rbx, rby = c.rby;
+      const nx = c.nx, ny = c.ny;
+
+      const vx = (A.linearVelocity.x - A.angularVelocity * ray) - (B.linearVelocity.x - B.angularVelocity * rby);
+      const vy = (A.linearVelocity.y + A.angularVelocity * rax) - (B.linearVelocity.y + B.angularVelocity * rbx);
+      const vn = vx * nx + vy * ny;
+      const vtx = vx - vn * nx, vty = vy - vn * ny;
+      const vt = Math.hypot(vtx, vty);
+
+      // Dynamic friction: shed tangential speed, capped by mu_d * f_n * h.
+      if (vt > 1e-9 && c.muD > 0) {
+        const fn = c.lambdaN / (h * h);
+        const dv = Math.min(c.muD * fn * h, vt);
+        const tx = vtx / vt, ty = vty / vt;
+        const wt = genInvMass(A, rax, ray, tx, ty) + genInvMass(B, rbx, rby, tx, ty);
+        if (wt > 0) applyVelocity(A, B, rax, ray, rbx, rby, -tx, -ty, dv / wt);
+      }
+
+      // Restitution, suppressed below 2*g*h so resting stacks do not buzz.
+      if (c.restitution > 0 && c.vnPrev > 2 * gMag * h) {
+        const vx2 = (A.linearVelocity.x - A.angularVelocity * ray) - (B.linearVelocity.x - B.angularVelocity * rby);
+        const vy2 = (A.linearVelocity.y + A.angularVelocity * rax) - (B.linearVelocity.y + B.angularVelocity * rbx);
+        const vnNow = vx2 * nx + vy2 * ny;
+        const target = -c.restitution * c.vnPrev;
+        if (target < vnNow) {
+          const wn = genInvMass(A, rax, ray, nx, ny) + genInvMass(B, rbx, rby, nx, ny);
+          if (wn > 0) applyVelocity(A, B, rax, ray, rbx, rby, nx, ny, (target - vnNow) / wn);
+        }
+      }
+    }
+  }
+
+  debugContacts() {
+    return this.contacts.map((c) => ({
+      x: c.wx, y: c.wy, nx: c.nx, ny: c.ny,
+      impulse: c.lambdaN, warm: false, separation: -c.d,
+    }));
+  }
+}
+
+// -- helpers -----------------------------------------------------------------
+
+/**
+ * Convert a manifold point (midpoint + separation) into the pair of local
+ * surface anchors plus the normal in the reference body's frame.
+ */
+function setAnchors(c, A, B, ref, nx, ny, px, py, separation) {
+  c.A = A; c.B = B; c.ref = ref;
+  // Surface point on A sits half the separation on the -n side of the midpoint
+  // (and vice versa), so that (pA - pB).n reproduces the penetration depth.
+  const sax = px - nx * 0.5 * separation, say = py - ny * 0.5 * separation;
+  const sbx = px + nx * 0.5 * separation, sby = py + ny * 0.5 * separation;
+  const ca = A.cos, sa = A.sin;
+  const dax = sax - A.position.x, day = say - A.position.y;
+  c.laAx = ca * dax + sa * day; c.laAy = -sa * dax + ca * day;
+  const cb = B.cos, sb = B.sin;
+  const dbx = sbx - B.position.x, dby = sby - B.position.y;
+  c.laBx = cb * dbx + sb * dby; c.laBy = -sb * dbx + cb * dby;
+  const cr = ref.cos, sr = ref.sin;
+  c.lnx = cr * nx + sr * ny; c.lny = -sr * nx + cr * ny;
+}
+
+function genInvMass(b, rx, ry, dx, dy) {
+  if (b.isStatic || b.sleeping) return 0;
+  const rn = rx * dy - ry * dx;
+  return b.invMass + b.invInertia * rn * rn;
+}
+
+/** Apply positional impulse `lam` along (dx,dy) to A, and its negation to B. */
+function applyPositional(A, B, rax, ray, rbx, rby, dx, dy, lam) {
+  const px = lam * dx, py = lam * dy;
+  if (!A.isStatic && !A.sleeping) {
+    A.position.x += A.invMass * px;
+    A.position.y += A.invMass * py;
+    A.angle += A.invInertia * (rax * py - ray * px);
+  }
+  if (!B.isStatic && !B.sleeping) {
+    B.position.x -= B.invMass * px;
+    B.position.y -= B.invMass * py;
+    B.angle -= B.invInertia * (rbx * py - rby * px);
+  }
+}
+
+function applyVelocity(A, B, rax, ray, rbx, rby, dx, dy, lam) {
+  const px = lam * dx, py = lam * dy;
+  if (!A.isStatic && !A.sleeping) {
+    A.linearVelocity.x += A.invMass * px;
+    A.linearVelocity.y += A.invMass * py;
+    A.angularVelocity += A.invInertia * (rax * py - ray * px);
+  }
+  if (!B.isStatic && !B.sleeping) {
+    B.linearVelocity.x -= B.invMass * px;
+    B.linearVelocity.y -= B.invMass * py;
+    B.angularVelocity -= B.invInertia * (rbx * py - rby * px);
+  }
+}
+
+const now = (typeof performance !== 'undefined' && performance.now)
+  ? () => performance.now()
+  : () => Number(process.hrtime.bigint() / 1000n) / 1000;
+
+// ===== src/scenes.js =====
+// Demo scenes. Identical for both engines, built from a seeded RNG so the two
+// solvers see bit-for-bit identical initial conditions.
+//
+// Everything is in SI units: metres, kilograms, seconds. Gravity is -9.81 m/s^2.
+// The ground plane is y = 0.
+
+
+const GROUND_FRICTION = 0.7;
+
+function addGround(world, halfWidth = 8) {
+  const g = makeStaticBox(0, -0.5, halfWidth, 0.5, { friction: GROUND_FRICTION, color: '#3a4252', label: 'ground' });
+  world.addBody(g);
+  return g;
+}
+
+// ---------------------------------------------------------------------------
+// House of cards
+// ---------------------------------------------------------------------------
+//
+// Card geometry. A real playing card is about 300:1 (89 mm x 0.3 mm) which no
+// rigid body engine handles; 15:1 is the honest "thin plank" compromise, and is
+// already thin enough to expose solver problems (see notes.md).
+const CARD_HALF_LEN = 0.30;    // 0.60 m long
+const CARD_HALF_THK = 0.02;    // 0.04 m thick  -> 15:1
+const CARD_LEAN = 18 * Math.PI / 180;
+const CARD_FRICTION = 0.75;
+// Bay spacing is pinned by the real construction: each flat card spans one bay,
+// so its ends land just inboard of two adjacent apexes, and adjacent flat cards
+// butt end-to-end over each apex without overlapping. That forces
+// spacing == card length (plus a hair of clearance). Any other value either
+// starts the scene interpenetrated or leaves the flat cards unsupported.
+const PAIR_SPACING = 2 * CARD_HALF_LEN + 0.004;   // 0.604 m
+const BASE_CLEAR = 0.0005;                       // clearance under each card
+
+function addCard(world, cx, cy, angle, opts) {
+  return world.addBody(makeBox(cx, cy, CARD_HALF_THK, CARD_HALF_LEN,
+                               Object.assign({ angle }, opts)));
+}
+
+/**
+ * One A-frame: two cards leaning together, top corners nearly touching.
+ * A small gap is left at the apex so the pair *settles* into contact rather
+ * than starting interpenetrated — starting a scene inside a deep overlap would
+ * measure the engines' recovery from a bad state, not their stacking quality.
+ */
+function addCardPair(world, cx, yBase, rng, opts) {
+  const L = CARD_HALF_LEN, t = CARD_HALF_THK;
+  const gap = 0.004;
+  // Deterministic asymmetry: perfectly symmetric structures are a degenerate
+  // special case (exact ties in SAT axis selection) and are not representative.
+  const thetaL = CARD_LEAN + rng.sym(0.012);
+  const thetaR = CARD_LEAN + rng.sym(0.012);
+  // A tilted card stands on ONE bottom corner, which is t*sin(theta) below the
+  // centre of its bottom face — so the centre has to be lifted by that much or
+  // the card starts buried in whatever it is standing on.
+  const yL = yBase + t * Math.sin(thetaL) + L * Math.cos(thetaL) + BASE_CLEAR;
+  const yR = yBase + t * Math.sin(thetaR) + L * Math.cos(thetaR) + BASE_CLEAR;
+  const left = addCard(world, cx - t * Math.cos(thetaL) - gap - L * Math.sin(thetaL), yL, -thetaL, opts);
+  const right = addCard(world, cx + t * Math.cos(thetaR) + gap + L * Math.sin(thetaR), yR, thetaR, opts);
+  return { left, right };
+}
+
+function houseOfCards(world, tiers = 4) {
+  const rng = new Rng(20260808);
+  addGround(world);
+  const cardOpts = { friction: CARD_FRICTION, restitution: 0, density: 1, color: '#e8dcc0' };
+  const flatOpts = { friction: CARD_FRICTION, restitution: 0, density: 1, color: '#d9c9a3' };
+
+  // Height of the A-frame's outer top corner above the tier floor: the card is
+  // lifted by t*sin(theta) so it stands on its low corner, and its high top
+  // corner is another t*sin(theta) above the top face centre. Getting either
+  // term wrong buries a card several millimetres into its neighbour at t = 0,
+  // which detonates the structure on the first step.
+  const cornerRise = 2 * CARD_HALF_LEN * Math.cos(CARD_LEAN)
+                   + 2 * CARD_HALF_THK * Math.sin(CARD_LEAN) + BASE_CLEAR;
+  const clearance = 0.003;
+  const tierPitch = cornerRise + clearance + 2 * CARD_HALF_THK;
+  const baseCount = tiers;
+  let yBase = 0;
+
+  for (let tier = 0; tier < tiers; tier++) {
+    const count = baseCount - tier;
+    const x0 = -(count - 1) * PAIR_SPACING * 0.5;
+    for (let i = 0; i < count; i++) {
+      addCardPair(world, x0 + i * PAIR_SPACING, yBase, rng, cardOpts);
+    }
+    // One flat card per bay. Each end rests on the nearer top corner of the
+    // A-frame below it, so every apex carries two card ends — one from each
+    // side — and the load on each A-frame stays balanced. The next tier's
+    // A-frames then sit centred on these flat cards, feet well inside the span.
+    for (let i = 0; i < count - 1; i++) {
+      world.addBody(makeBox(x0 + (i + 0.5) * PAIR_SPACING,
+                            yBase + cornerRise + clearance + CARD_HALF_THK,
+                            CARD_HALF_LEN, CARD_HALF_THK, flatOpts));
+    }
+    yBase += tierPitch;
+  }
+  // Mark the topmost cards so the metrics code can watch the apex height.
+  const maxY = Math.max(...world.bodies.filter((b) => !b.isStatic).map((b) => b.position.y));
+  for (const b of world.bodies) if (!b.isStatic && b.position.y > maxY - 0.4) b.tracked = true;
+}
+
+/**
+ * Kick the outermost foot of the lowest-left A-frame outwards — the way a real
+ * house of cards is knocked down. Strong enough to be unambiguous: a nudge that
+ * a stable solver simply absorbs makes for a useless collapse test.
+ */
+/**
+ * Pull one card out of the bottom tier — the canonical way a house of cards
+ * comes down, and a decisive perturbation.
+ *
+ * Kicking a card instead turned out to be a poor test: the structure loads its
+ * own feet heavily, so friction absorbs even a 3.5 m/s flick within ~100 mm.
+ * That is correct physics rather than solver stiffness (both engines agreed),
+ * but it makes for a collapse test that never collapses.
+ */
+function pullBottomCard(world) {
+  const cards = world.bodies.filter((b) => !b.isStatic);
+  const lowest = Math.min(...cards.map((b) => b.position.y));
+  const bottom = cards.filter((b) => b.position.y < lowest + 0.1);
+  // Second A-frame from the left: removing an interior support drops the tier
+  // above it, rather than just toppling the end of the structure.
+  bottom.sort((a, b) => a.position.x - b.position.x);
+  const target = bottom[Math.min(2, bottom.length - 1)];
+  world.removeBody(target);
+  world.wakeAll();
+}
+
+// ---------------------------------------------------------------------------
+// Scene table
+// ---------------------------------------------------------------------------
+
+const scenes = {
+  houseOfCards: {
+    name: 'House of cards',
+    blurb: '4 tiers, 26 thin cards (15:1). Stands only if static friction holds at every apex and foot. The headline test.',
+    view: { cx: 0, cy: 1.4, height: 3.6 },
+    build(world) { houseOfCards(world, 4); },
+    perturb(world) { pullBottomCard(world); },
+    perturbLabel: 'Pull out a bottom card',
+  },
+
+  bigHouse: {
+    name: 'House of cards (6 tiers)',
+    blurb: 'Same construction scaled to 6 tiers / 66 cards. Contact graph is deep enough that solver convergence, not geometry, decides whether it stands.',
+    view: { cx: 0, cy: 2.0, height: 5.0 },
+    build(world) { houseOfCards(world, 6); },
+    perturb(world) { pullBottomCard(world); },
+    perturbLabel: 'Pull out a bottom card',
+  },
+
+  tower: {
+    name: 'Box tower',
+    blurb: '13 boxes stacked with a 1.5 mm placement error each — just inside the height at which the tower topples on its own. Measures lean drift in a long serial contact chain.',
+    view: { cx: 0, cy: 2.1, height: 4.8 },
+    build(world) {
+      // 13 x 1.5 mm is deliberately close to the edge: at 14 boxes the tower
+      // genuinely falls over under either solver, which is correct physics and
+      // useless as a drift measurement.
+      const rng = new Rng(7);
+      addGround(world);
+      const h = 0.15;
+      for (let i = 0; i < 13; i++) {
+        const b = makeBox(rng.sym(0.0015), h + i * (2 * h + 0.001), h, h, {
+          friction: 0.6, restitution: 0, color: `hsl(${200 + i * 6} 45% ${45 + (i % 2) * 8}%)`,
+          tracked: i >= 10,
+        });
+        world.addBody(b);
+      }
+    },
+    perturb(world) {
+      const top = world.bodies[world.bodies.length - 1];
+      top.linearVelocity.x += 3.0;
+      world.wakeAll();
+    },
+    perturbLabel: 'Shove the top box',
+  },
+
+  pyramid: {
+    name: 'Box pyramid',
+    blurb: '78 boxes, 12 wide at the base. A wide, heavily redundant contact graph — the case where Gauss-Seidel ordering artefacts show up.',
+    view: { cx: 0, cy: 1.9, height: 4.6 },
+    build(world) {
+      const rng = new Rng(99);
+      addGround(world);
+      const h = 0.15, pitch = 2 * h + 0.005;
+      const rows = 12;
+      for (let r = 0; r < rows; r++) {
+        const n = rows - r;
+        const x0 = -(n - 1) * pitch * 0.5;
+        for (let i = 0; i < n; i++) {
+          world.addBody(makeBox(x0 + i * pitch + rng.sym(0.001), h + r * (2 * h + 0.001), h, h, {
+            friction: 0.6, restitution: 0,
+            color: `hsl(${20 + r * 8} 55% ${52 + (i % 2) * 6}%)`,
+            tracked: r >= rows - 2,
+          }));
+        }
+      }
+    },
+    perturb(world) {
+      const ball = makeCircle(-4.5, 2.4, 0.22, { density: 6, friction: 0.4, restitution: 0.1, color: '#c94f4f' });
+      ball.linearVelocity.x = 14;
+      world.addBody(ball);
+      world.wakeAll();
+    },
+    perturbLabel: 'Fire a cannonball',
+  },
+
+  dominoes: {
+    name: 'Dominoes',
+    blurb: '24 thin dominoes plus a rolling trigger. A travelling collapse wave: tests impulse propagation and thin-body contact quality.',
+    view: { cx: 0, cy: 0.75, height: 2.0 },
+    build(world) {
+      addGround(world);
+      const hw = 0.022, hh = 0.20;
+      for (let i = 0; i < 24; i++) {
+        world.addBody(makeBox(-2.6 + i * 0.22, hh, hw, hh, {
+          friction: 0.55, restitution: 0,
+          color: `hsl(${215 + (i % 3) * 10} 30% ${72 - (i % 2) * 8}%)`,
+          tracked: i >= 22,
+        }));
+      }
+    },
+    perturb(world) {
+      const ball = makeCircle(-3.4, 0.5, 0.1, { density: 4, friction: 0.4, restitution: 0.05, color: '#c94f4f' });
+      ball.linearVelocity.x = 3.2;
+      world.addBody(ball);
+      world.wakeAll();
+    },
+    perturbLabel: 'Roll the trigger ball',
+  },
+
+  wall: {
+    name: 'Brick wall',
+    blurb: 'Staggered running-bond wall, 10 courses. Perturbed by a heavy projectile: a genuinely impulsive collapse rather than a quasi-static one.',
+    view: { cx: 0, cy: 1.4, height: 3.6 },
+    build(world) {
+      const rng = new Rng(4242);
+      addGround(world);
+      const hw = 0.24, hh = 0.10;
+      const pitch = 2 * hw + 0.006;   // > 2*hw, or the jitter starts bricks overlapping
+      for (let r = 0; r < 10; r++) {
+        const offset = (r % 2) ? pitch * 0.5 : 0;
+        for (let i = -3; i <= 3; i++) {
+          const x = i * pitch + offset;
+          if (x - hw < -1.9 || x + hw > 1.9) continue;
+          world.addBody(makeBox(x + rng.sym(0.0008), hh + r * (2 * hh + 0.001), hw, hh, {
+            friction: 0.65, restitution: 0,
+            color: `hsl(${12 + (r % 2) * 6} 42% ${46 + (i % 2) * 7}%)`,
+            tracked: r >= 8,
+          }));
+        }
+      }
+    },
+    perturb(world) {
+      const ball = makeCircle(-4.0, 1.5, 0.28, { density: 9, friction: 0.3, restitution: 0.05, color: '#8d8f99' });
+      ball.linearVelocity.x = 16;
+      world.addBody(ball);
+      world.wakeAll();
+    },
+    perturbLabel: 'Launch the wrecking ball',
+  },
+
+  friction: {
+    name: 'Friction ramp (validation)',
+    blurb: 'Blocks on a 25° ramp with μ = 0.20 / 0.40 / 0.60 / 0.80. Theory: slides iff μ < tan 25° = 0.466. The first two must slide, the last two must not.',
+    view: { cx: 0, cy: 1.1, height: 3.0 },
+    build(world) {
+      addGround(world, 10);
+      const ang = 25 * Math.PI / 180;
+      const mus = [0.20, 0.40, 0.60, 0.80];
+      for (let i = 0; i < mus.length; i++) {
+        const mu = mus[i];
+        const x0 = -3.6 + i * 2.4;
+        const ramp = new Body({
+          shape: boxShape(1.0, 0.05), x: x0, y: 0.9, angle: ang, type: STATIC,
+          friction: mu, color: '#3a4252', label: `ramp ${mu}`,
+        });
+        world.addBody(ramp);
+        // Block sits on the ramp surface, up-slope end.
+        const bh = 0.12;
+        const along = -0.5;
+        const nx = -Math.sin(ang), ny = Math.cos(ang);
+        const tx = Math.cos(ang), ty = Math.sin(ang);
+        world.addBody(makeBox(
+          x0 + tx * along + nx * (0.05 + bh + 0.002),
+          0.9 + ty * along + ny * (0.05 + bh + 0.002),
+          bh, bh, {
+            angle: ang, friction: mu, restitution: 0, tracked: true,
+            color: mu < Math.tan(ang) ? '#c9705a' : '#5a9c78',
+            label: `mu=${mu.toFixed(2)}`,
+          }));
+      }
+    },
+    perturb(world) { world.wakeAll(); },
+    perturbLabel: 'Wake all',
+  },
+
+  arch: {
+    name: 'Corbelled arch',
+    blurb: 'A dry-stone corbel arch closed by a heavy capstone. Every block cantilevers over the one below, so the whole thing is a stack of overturning moments in near balance.',
+    view: { cx: 0, cy: 1.1, height: 3.0 },
+    build(world) {
+      addGround(world);
+      const rng = new Rng(555);
+      const hw = 0.22, hh = 0.09;
+      const courses = 9;
+      // Corbel step is bounded by the classic overhang limit: the centre of
+      // mass of everything above course i must stay over course i's footprint,
+      // which caps the step at about 2*hw/courses. 45 mm leaves a small margin;
+      // the first version used 140 mm and simply fell over, correctly.
+      for (let r = 0; r < courses; r++) {
+        const inset = 0.045 * r;
+        for (const side of [-1, 1]) {
+          const x = side * (0.9 - inset);
+          world.addBody(makeBox(x + rng.sym(0.001), hh + r * (2 * hh + 0.001), hw, hh, {
+            friction: 0.8, restitution: 0, color: `hsl(${35 + r * 3} 25% ${58 - r * 2}%)`,
+            tracked: r >= courses - 2,
+          }));
+        }
+      }
+      // Capstone bridging the top of the corbel; twice the density of the
+      // blocks, so it genuinely loads the structure.
+      world.addBody(makeBox(0, hh + courses * (2 * hh + 0.001), 0.46, hh, {
+        friction: 0.8, restitution: 0, density: 2, color: '#9a8f7a', tracked: true,
+      }));
+    },
+    perturb(world) {
+      const ball = makeCircle(0, 3.4, 0.2, { density: 8, friction: 0.5, restitution: 0.0, color: '#c94f4f' });
+      world.addBody(ball);
+      world.wakeAll();
+    },
+    perturbLabel: 'Drop a weight on the capstone',
+  },
+};
+
+const sceneKeys = Object.keys(scenes);
+
+/** Build a scene into a fresh world. Body ids restart so both engines match. */
+function buildScene(world, key) {
+  world.clear();
+  resetBodyIds();
+  const s = scenes[key] || scenes.houseOfCards;
+  s.build(world);
+  for (const b of world.bodies) b.updateTransform();
+  return s;
+}
+
+// ===== src/metrics.js =====
+// Scene-level measurements shared by the browser HUD and the headless bench.
+// These are the numbers the evaluation in README.md is built from.
+
+function measure(world) {
+  let apex = -Infinity;
+  let maxDisp = 0, sumDisp = 0, n = 0;
+  let moving = 0, energy = 0;
+  let trackedApex = -Infinity;
+  for (const b of world.bodies) {
+    if (b.isStatic) continue;
+    n++;
+    const dx = b.position.x - b.initialPosition.x;
+    const dy = b.position.y - b.initialPosition.y;
+    const d = Math.hypot(dx, dy);
+    sumDisp += d;
+    if (d > maxDisp) maxDisp = d;
+    if (b.position.y > apex) apex = b.position.y;
+    if (b.tracked && b.position.y > trackedApex) trackedApex = b.position.y;
+    const v = b.linearVelocity;
+    if (v.x * v.x + v.y * v.y > 0.01 || Math.abs(b.angularVelocity) > 0.2) moving++;
+    energy += b.kineticEnergy();
+  }
+  return {
+    apexHeight: apex === -Infinity ? 0 : apex,
+    trackedHeight: trackedApex === -Infinity ? 0 : trackedApex,
+    maxDisplacement: maxDisp,
+    avgDisplacement: n ? sumDisp / n : 0,
+    movingBodies: moving,
+    dynamicBodies: n,
+    energy,
+    maxPenetration: world.stats.maxPenetration,
+    avgPenetration: world.stats.avgPenetration,
+    contacts: world.stats.contacts,
+    points: world.stats.points,
+  };
+}
+
+/**
+ * A cheap order-sensitive hash of the whole world state. Two runs that agree on
+ * this are bit-identical, which is how the determinism check works.
+ */
+function stateHash(world) {
+  let h = 2166136261 >>> 0;
+  const buf = new Float64Array(1);
+  const view = new Uint32Array(buf.buffer);
+  const mix = (x) => {
+    buf[0] = x;
+    h ^= view[0]; h = Math.imul(h, 16777619) >>> 0;
+    h ^= view[1]; h = Math.imul(h, 16777619) >>> 0;
+  };
+  for (const b of world.bodies) {
+    mix(b.position.x); mix(b.position.y); mix(b.angle);
+    mix(b.linearVelocity.x); mix(b.linearVelocity.y); mix(b.angularVelocity);
+  }
+  return h >>> 0;
+}
+
+// ===== src/app/renderer.js =====
+// Canvas renderer + debug draw. Shared by both builds.
+
+class Renderer {
+  constructor(canvas) {
+    this.canvas = canvas;
+    this.ctx = canvas.getContext('2d');
+    this.camera = { x: 0, y: 1.5, height: 4 };   // world units visible vertically
+    this.dpr = Math.min(window.devicePixelRatio || 1, 2);
+    this.show = { contacts: false, normals: false, aabb: false, impulses: false, com: false };
+  }
+
+  resize() {
+    const r = this.canvas.getBoundingClientRect();
+    this.canvas.width = Math.max(1, Math.round(r.width * this.dpr));
+    this.canvas.height = Math.max(1, Math.round(r.height * this.dpr));
+    this.w = r.width; this.h = r.height;
+  }
+
+  get scale() { return this.h / this.camera.height; }
+
+  toScreen(x, y) {
+    const s = this.scale;
+    return [(x - this.camera.x) * s + this.w / 2, this.h - (y - this.camera.y) * s - this.h / 2];
+  }
+
+  toWorld(px, py) {
+    const s = this.scale;
+    return {
+      x: (px - this.w / 2) / s + this.camera.x,
+      y: (this.h / 2 - py) / s + this.camera.y,
+    };
+  }
+
+  fitTo(view) {
+    this.camera.x = view.cx;
+    this.camera.y = view.cy;
+    this.camera.height = view.height;
+  }
+
+  draw(world) {
+    const ctx = this.ctx;
+    ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+    ctx.clearRect(0, 0, this.w, this.h);
+
+    this.drawGrid();
+
+    for (const b of world.bodies) this.drawBody(ctx, b);
+
+    if (this.show.aabb) {
+      ctx.strokeStyle = 'rgba(120,200,255,0.35)';
+      ctx.lineWidth = 1;
+      for (const b of world.bodies) {
+        const [x0, y0] = this.toScreen(b.aabb.minX, b.aabb.maxY);
+        const [x1, y1] = this.toScreen(b.aabb.maxX, b.aabb.minY);
+        ctx.strokeRect(x0, y0, x1 - x0, y1 - y0);
+      }
+    }
+
+    if (this.show.contacts || this.show.normals || this.show.impulses) {
+      const cs = world.debugContacts();
+      let maxJ = 1e-9;
+      for (const c of cs) if (c.impulse > maxJ) maxJ = c.impulse;
+      for (const c of cs) {
+        const [x, y] = this.toScreen(c.x, c.y);
+        if (this.show.contacts) {
+          // Persistent (warm-started) contacts are drawn differently from new
+          // ones: a stack that is holding shows solid dots, a stack whose
+          // manifolds keep being rebuilt shows flickering rings.
+          ctx.fillStyle = c.warm ? '#ffd166' : '#ff6b6b';
+          ctx.beginPath();
+          ctx.arc(x, y, c.warm ? 2.6 : 2.0, 0, 6.2832);
+          ctx.fill();
+        }
+        if (this.show.normals) {
+          ctx.strokeStyle = 'rgba(255,209,102,0.8)';
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.moveTo(x, y);
+          ctx.lineTo(x + c.nx * 14, y - c.ny * 14);
+          ctx.stroke();
+        }
+        if (this.show.impulses && c.impulse > 0) {
+          const l = 6 + 34 * Math.sqrt(c.impulse / maxJ);
+          ctx.strokeStyle = 'rgba(120,220,160,0.85)';
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.moveTo(x, y);
+          ctx.lineTo(x + c.nx * l, y - c.ny * l);
+          ctx.stroke();
+        }
+      }
+    }
+  }
+
+  drawGrid() {
+    const ctx = this.ctx;
+    const step = 1;
+    const left = this.camera.x - (this.w / this.scale) / 2;
+    const right = this.camera.x + (this.w / this.scale) / 2;
+    const bottom = this.camera.y - this.camera.height / 2;
+    const top = this.camera.y + this.camera.height / 2;
+    ctx.strokeStyle = 'rgba(255,255,255,0.045)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (let x = Math.floor(left / step) * step; x <= right; x += step) {
+      const [sx] = this.toScreen(x, 0);
+      ctx.moveTo(sx, 0); ctx.lineTo(sx, this.h);
+    }
+    for (let y = Math.floor(bottom / step) * step; y <= top; y += step) {
+      const [, sy] = this.toScreen(0, y);
+      ctx.moveTo(0, sy); ctx.lineTo(this.w, sy);
+    }
+    ctx.stroke();
+  }
+
+  drawBody(ctx, b) {
+    const fill = b.isStatic ? '#39404f' : (b.color || '#c9d2e3');
+    ctx.fillStyle = b.sleeping ? mixHex(fill, '#4a5060', 0.55) : fill;
+    ctx.strokeStyle = 'rgba(0,0,0,0.45)';
+    ctx.lineWidth = 1;
+
+    if (b.shape.type === 'poly') {
+      const v = b.worldVerts;
+      ctx.beginPath();
+      let p = this.toScreen(v[0].x, v[0].y);
+      ctx.moveTo(p[0], p[1]);
+      for (let i = 1; i < v.length; i++) {
+        p = this.toScreen(v[i].x, v[i].y);
+        ctx.lineTo(p[0], p[1]);
+      }
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+    } else {
+      const [x, y] = this.toScreen(b.position.x, b.position.y);
+      const r = b.shape.radius * this.scale;
+      ctx.beginPath();
+      ctx.arc(x, y, r, 0, 6.2832);
+      ctx.fill();
+      ctx.stroke();
+      // Spoke, so rolling versus sliding is visible.
+      ctx.beginPath();
+      ctx.moveTo(x, y);
+      ctx.lineTo(x + Math.cos(b.angle) * r, y - Math.sin(b.angle) * r);
+      ctx.strokeStyle = 'rgba(0,0,0,0.5)';
+      ctx.stroke();
+    }
+
+    if (this.show.com && !b.isStatic) {
+      const [x, y] = this.toScreen(b.position.x, b.position.y);
+      ctx.fillStyle = 'rgba(0,0,0,0.6)';
+      ctx.fillRect(x - 1.5, y - 1.5, 3, 3);
+    }
+  }
+}
+
+function mixHex(a, b, t) {
+  const pa = parseHex(a), pb = parseHex(b);
+  if (!pa || !pb) return a;
+  const c = pa.map((v, i) => Math.round(v + (pb[i] - v) * t));
+  return `rgb(${c[0]},${c[1]},${c[2]})`;
+}
+function parseHex(h) {
+  if (typeof h !== 'string' || h[0] !== '#' || h.length !== 7) return null;
+  return [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16));
+}
+
+/** Small rolling strip chart for the metrics panel. */
+class Strip {
+  constructor(canvas, color, label, opts = {}) {
+    this.canvas = canvas;
+    this.ctx = canvas.getContext('2d');
+    this.color = color;
+    this.label = label;
+    this.data = [];
+    this.max = opts.max || 0;
+    this.log = !!opts.log;
+    this.n = opts.n || 240;
+    this.dpr = Math.min(window.devicePixelRatio || 1, 2);
+  }
+  push(v) {
+    this.data.push(v);
+    if (this.data.length > this.n) this.data.shift();
+  }
+  reset() { this.data.length = 0; }
+  draw(unit = '') {
+    const c = this.canvas, ctx = this.ctx;
+    const r = c.getBoundingClientRect();
+    if (c.width !== Math.round(r.width * this.dpr)) {
+      c.width = Math.round(r.width * this.dpr);
+      c.height = Math.round(r.height * this.dpr);
+    }
+    ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+    const w = r.width, h = r.height;
+    ctx.clearRect(0, 0, w, h);
+    ctx.fillStyle = 'rgba(255,255,255,0.03)';
+    ctx.fillRect(0, 0, w, h);
+
+    let peak = this.max;
+    for (const v of this.data) if (v > peak) peak = v;
+    if (peak <= 0) peak = 1;
+
+    ctx.strokeStyle = this.color;
+    ctx.lineWidth = 1.4;
+    ctx.beginPath();
+    for (let i = 0; i < this.data.length; i++) {
+      const x = (i / (this.n - 1)) * w;
+      const t = this.log ? Math.log10(1 + 9 * this.data[i] / peak) : this.data[i] / peak;
+      const y = h - t * (h - 3) - 1.5;
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+
+    ctx.fillStyle = 'rgba(220,228,242,0.75)';
+    ctx.font = '10px ui-monospace, Menlo, monospace';
+    ctx.fillText(`${this.label}  peak ${fmt(peak)}${unit}`, 5, 11);
+  }
+}
+
+function fmt(v) {
+  if (v === 0) return '0';
+  if (Math.abs(v) >= 100) return v.toFixed(0);
+  if (Math.abs(v) >= 1) return v.toFixed(2);
+  return v.toPrecision(2);
+}
+
+// ===== src/app/ui.js =====
+// The interactive harness: fixed-timestep loop, controls, HUD, mouse handling.
+// Engine-agnostic — it only touches the World API that both engines implement,
+// so the two pages are identical apart from which solver is compiled in.
+
+
+
+
+const FIXED_DT = 1 / 60;
+
+function boot(World, opts = {}) {
+  const canvas = document.getElementById('view');
+  const renderer = new Renderer(canvas);
+  const world = new World();
+
+  const state = {
+    running: true,
+    sceneKey: sceneKeys[0],
+    speed: 1,
+    accumulator: 0,
+    lastTime: performance.now(),
+    stepMs: 0,
+    frameMs: 0,
+    fps: 0,
+    apex0: 0,
+    simTime: 0,
+    stepCount: 0,
+    drag: null,
+    pan: null,
+  };
+
+  const strips = {
+    pen: new Strip(document.getElementById('strip-pen'), '#ff9f68', 'max overlap (mm)'),
+    energy: new Strip(document.getElementById('strip-energy'), '#79c7ff', 'kinetic energy (J)'),
+    cost: new Strip(document.getElementById('strip-cost'), '#8ce99a', 'step cost (ms)'),
+  };
+
+  // -- scene handling --------------------------------------------------------
+
+  function loadScene(key) {
+    state.sceneKey = key;
+    const s = buildScene(world, key);
+    renderer.fitTo(s.view);
+    state.apex0 = measure(world).apexHeight;
+    state.simTime = 0;
+    state.stepCount = 0;
+    for (const k in strips) strips[k].reset();
+    document.getElementById('scene-blurb').textContent = s.blurb;
+    document.getElementById('btn-perturb').textContent = s.perturbLabel;
+    return s;
+  }
+
+  // -- UI construction -------------------------------------------------------
+
+  const sceneSelect = document.getElementById('scene');
+  for (const k of sceneKeys) {
+    const o = document.createElement('option');
+    o.value = k; o.textContent = scenes[k].name;
+    sceneSelect.appendChild(o);
+  }
+  sceneSelect.addEventListener('change', () => loadScene(sceneSelect.value));
+
+  document.getElementById('btn-play').addEventListener('click', (e) => {
+    state.running = !state.running;
+    e.target.textContent = state.running ? 'Pause' : 'Play';
+  });
+  document.getElementById('btn-step').addEventListener('click', () => {
+    state.running = false;
+    document.getElementById('btn-play').textContent = 'Play';
+    doStep();
+  });
+  document.getElementById('btn-reset').addEventListener('click', () => loadScene(state.sceneKey));
+  document.getElementById('btn-perturb').addEventListener('click', () => {
+    scenes[state.sceneKey].perturb(world);
+  });
+
+  const paramHost = document.getElementById('params');
+  for (const p of World.params) {
+    paramHost.appendChild(makeControl(world, p));
+  }
+  // Shared knobs, identical in both builds.
+  paramHost.appendChild(makeControl(world, { key: 'allowSleep', label: 'Sleeping', type: 'bool' }));
+  paramHost.appendChild(makeControl(world.gravity, { key: 'y', label: 'Gravity (m/s²)', min: -20, max: 0, step: 0.1 }));
+
+  const debugHost = document.getElementById('debug');
+  for (const [key, label] of [['contacts', 'Contact points'], ['normals', 'Contact normals'],
+                              ['impulses', 'Normal impulse magnitude'], ['aabb', 'AABBs'], ['com', 'Centres of mass']]) {
+    debugHost.appendChild(makeControl(renderer.show, { key, label, type: 'bool' }));
+  }
+
+  const speedSel = document.getElementById('speed');
+  speedSel.addEventListener('change', () => { state.speed = parseFloat(speedSel.value); });
+
+  // -- mouse -----------------------------------------------------------------
+
+  canvas.addEventListener('pointerdown', (e) => {
+    const rect = canvas.getBoundingClientRect();
+    const p = renderer.toWorld(e.clientX - rect.left, e.clientY - rect.top);
+    if (e.button === 1 || e.shiftKey) {
+      state.pan = { x: e.clientX, y: e.clientY, cx: renderer.camera.x, cy: renderer.camera.y };
+      canvas.setPointerCapture(e.pointerId);
+      return;
+    }
+    if (e.altKey) {
+      const b = e.ctrlKey
+        ? makeCircle(p.x, p.y, 0.14, { density: 3, friction: 0.5, color: '#c94f4f' })
+        : makeBox(p.x, p.y, 0.14, 0.14, { friction: 0.5, color: '#7f9cc9' });
+      world.addBody(b);
+      world.wakeAll();
+      return;
+    }
+    const body = pick(world, p);
+    if (body) {
+      state.drag = { body, target: p, offset: { x: p.x - body.position.x, y: p.y - body.position.y } };
+      world.wakeAll();
+      canvas.setPointerCapture(e.pointerId);
+    }
+  });
+
+  canvas.addEventListener('pointermove', (e) => {
+    const rect = canvas.getBoundingClientRect();
+    if (state.pan) {
+      const s = renderer.scale;
+      renderer.camera.x = state.pan.cx - (e.clientX - state.pan.x) / s;
+      renderer.camera.y = state.pan.cy + (e.clientY - state.pan.y) / s;
+      return;
+    }
+    if (state.drag) state.drag.target = renderer.toWorld(e.clientX - rect.left, e.clientY - rect.top);
+  });
+
+  const endPointer = () => { state.drag = null; state.pan = null; };
+  canvas.addEventListener('pointerup', endPointer);
+  canvas.addEventListener('pointercancel', endPointer);
+  canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+
+  canvas.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    const f = Math.exp(e.deltaY * 0.0012);
+    renderer.camera.height = Math.min(30, Math.max(0.4, renderer.camera.height * f));
+  }, { passive: false });
+
+  window.addEventListener('keydown', (e) => {
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
+    if (e.code === 'Space') { e.preventDefault(); document.getElementById('btn-play').click(); }
+    if (e.code === 'KeyR') loadScene(state.sceneKey);
+    if (e.code === 'KeyP') document.getElementById('btn-perturb').click();
+    if (e.code === 'Period') document.getElementById('btn-step').click();
+  });
+
+  /**
+   * Dragging applies a critically-damped impulse towards the cursor rather than
+   * teleporting the body. Teleporting would inject arbitrary constraint error,
+   * which is exactly what these engines are being measured on.
+   */
+  function applyDrag() {
+    const d = state.drag;
+    if (!d || d.body.isStatic) return;
+    const b = d.body;
+    const px = b.position.x + d.offset.x, py = b.position.y + d.offset.y;
+    const k = 24, c = 6;
+    const fx = (d.target.x - px) * k - b.linearVelocity.x * c;
+    const fy = (d.target.y - py) * k - b.linearVelocity.y * c;
+    b.applyForce(fx / b.invMass, fy / b.invMass);
+    b.wake();
+  }
+
+  // -- main loop -------------------------------------------------------------
+
+  function doStep() {
+    applyDrag();
+    const t0 = performance.now();
+    world.step(FIXED_DT);
+    state.stepMs = state.stepMs * 0.9 + (performance.now() - t0) * 0.1;
+    state.simTime += FIXED_DT;
+    state.stepCount++;
+  }
+
+  function frame(now) {
+    const dt = Math.min(0.05, (now - state.lastTime) / 1000);
+    state.lastTime = now;
+    state.fps = state.fps * 0.9 + (1 / Math.max(dt, 1e-4)) * 0.1;
+
+    if (state.running) {
+      // Fixed timestep with an accumulator: the physics is identical whatever
+      // the display refresh rate, which is what makes the two pages comparable.
+      state.accumulator += dt * state.speed;
+      let guard = 0;
+      while (state.accumulator >= FIXED_DT && guard++ < 8) {
+        state.accumulator -= FIXED_DT;
+        doStep();
+      }
+      if (guard >= 8) state.accumulator = 0;   // give up rather than spiral
+    }
+
+    renderer.resize();
+    renderer.draw(world);
+    updateHud();
+    requestAnimationFrame(frame);
+  }
+
+  const hudRows = {};
+  function hud(label, value) {
+    if (!hudRows[label]) {
+      const row = document.createElement('div');
+      row.className = 'row';
+      row.innerHTML = `<span>${label}</span><b></b>`;
+      document.getElementById('hud').appendChild(row);
+      hudRows[label] = row.querySelector('b');
+    }
+    hudRows[label].textContent = value;
+  }
+
+  let hudTick = 0;
+  function updateHud() {
+    const s = world.stats;
+    if (state.stepCount % 2 === 0) {
+      strips.pen.push(s.maxPenetration * 1000);
+      strips.energy.push(s.energy);
+      strips.cost.push(s.totalMs);
+    }
+    if (hudTick++ % 6 !== 0) return;
+
+    const m = measure(world);
+    hud('display fps', state.fps.toFixed(0));
+    hud('sim time', state.simTime.toFixed(2) + ' s');
+    hud('bodies', `${s.bodies} (${s.sleeping} asleep)`);
+    hud('contacts / points', `${s.contacts} / ${s.points}`);
+    hud('step cost', `${state.stepMs.toFixed(3)} ms`);
+    hud('  broad / narrow', `${s.broadMs.toFixed(3)} / ${s.narrowMs.toFixed(3)} ms`);
+    hud('  solve / position', `${s.solveMs.toFixed(3)} / ${s.positionMs.toFixed(3)} ms`);
+    hud('max overlap', `${(s.maxPenetration * 1000).toFixed(3)} mm`);
+    hud('mean overlap', `${(s.avgPenetration * 1000).toFixed(3)} mm`);
+    hud('kinetic energy', `${s.energy.toFixed(4)} J`);
+    hud('apex height', `${m.apexHeight.toFixed(3)} m  (${((m.apexHeight - state.apex0) * 1000).toFixed(0)} mm)`);
+    hud('max displacement', `${(m.maxDisplacement * 1000).toFixed(1)} mm`);
+    hud('bodies moving', `${m.movingBodies}`);
+
+    strips.pen.draw(' mm');
+    strips.energy.draw(' J');
+    strips.cost.draw(' ms');
+  }
+
+  document.getElementById('engine-name').textContent = world.name;
+  document.title = `${world.name} — 2D rigid body demo`;
+  if (opts.accent) document.documentElement.style.setProperty('--accent', opts.accent);
+
+  loadScene(state.sceneKey);
+  sceneSelect.value = state.sceneKey;
+  renderer.resize();
+  requestAnimationFrame(frame);
+
+  // Handy for poking at the sim from the console.
+  window.demo = { world, renderer, state, loadScene, scenes };
+}
+
+/** Topmost body whose shape contains the point. */
+function pick(world, p) {
+  for (let i = world.bodies.length - 1; i >= 0; i--) {
+    const b = world.bodies[i];
+    if (b.isStatic) continue;
+    if (b.shape.type === 'circle') {
+      if (Math.hypot(p.x - b.position.x, p.y - b.position.y) <= b.shape.radius) return b;
+    } else {
+      let inside = true;
+      const v = b.worldVerts, n = b.worldNormals;
+      for (let k = 0; k < v.length; k++) {
+        if (n[k].x * (p.x - v[k].x) + n[k].y * (p.y - v[k].y) > 0) { inside = false; break; }
+      }
+      if (inside) return b;
+    }
+  }
+  return null;
+}
+
+function makeControl(target, p, onChange) {
+  const wrap = document.createElement('label');
+  wrap.className = 'ctl';
+  if (p.type === 'bool') {
+    const input = document.createElement('input');
+    input.type = 'checkbox';
+    input.checked = !!target[p.key];
+    input.addEventListener('change', () => { target[p.key] = input.checked; if (onChange) onChange(); });
+    wrap.appendChild(input);
+    const span = document.createElement('span');
+    span.textContent = p.label;
+    wrap.appendChild(span);
+    return wrap;
+  }
+  const head = document.createElement('span');
+  const val = document.createElement('b');
+  const fmt = (v) => (p.step >= 1 ? v.toFixed(0) : String(+v.toFixed(6)));
+  head.textContent = p.label;
+  val.textContent = fmt(target[p.key]);
+  const input = document.createElement('input');
+  input.type = 'range';
+  input.min = p.min; input.max = p.max; input.step = p.step;
+  input.value = target[p.key];
+  input.addEventListener('input', () => {
+    target[p.key] = parseFloat(input.value);
+    val.textContent = fmt(target[p.key]);
+    if (onChange) onChange();
+  });
+  const row = document.createElement('div');
+  row.className = 'ctl-head';
+  row.appendChild(head); row.appendChild(val);
+  wrap.appendChild(row);
+  wrap.appendChild(input);
+  return wrap;
+}
+
+boot(World, { accent: "#8ce99a" });
+})();
+</script>
+</body>
+</html>
