@@ -50,3 +50,14 @@
   to their real paths, added a `.gitignore` for `_site/`, and re-ran the build from the root.
 - Merging before enabling Pages makes the first deploy fail (Pages not configured); the README says to
   re-run the workflow by hand after switching the source to "GitHub Actions".
+
+## Follow-up: project pages
+- After the first deploy the user pointed out the index titles linked to GitHub, so nothing on the site
+  except the two physics demos was reachable as a page.
+- Fix: `render-pages-index.py` → `render-pages-site.py`, which also renders each project's `.md` files into
+  the site (README.md → `<folder>/index.html`, notes.md → notes.html), rewrites relative `.md` links, and
+  points index titles at the project page (GitHub becomes a small "source" link).
+- Tried the GitHub `/markdown` API (what Simon uses) for rendering: blocked from this container ("sessions are
+  bound to their configured repositories"), so it couldn't be tested here. Used Python-Markdown 3.11.1
+  (`extra`, `sane_lists`, `toc`), installed in the workflow from `requirements-pages.txt`.
+- Checked by serving `_site/` locally and screenshotting with Chromium: tables, images, code and links render.

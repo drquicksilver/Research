@@ -5,7 +5,8 @@
 #    can generate assets that are not committed.
 # 2. Copy the repo (minus git/CI/dependency clutter) into _site/, so every
 #    committed file is served at https://<owner>.github.io/<repo>/<path>.
-# 3. Generate _site/index.html listing every project and its HTML artefacts.
+# 3. Render each project's Markdown (README.md -> <folder>/index.html) and
+#    write _site/index.html listing every project and its HTML artefacts.
 set -euo pipefail
 
 site_dir="_site"
@@ -30,5 +31,5 @@ rsync -a ./ "$site_dir"/ \
   --exclude .pytest_cache/ \
   --exclude .DS_Store
 
-python3 render-pages-index.py . "$site_dir/index.html"
+python3 render-pages-site.py . "$site_dir"
 touch "$site_dir/.nojekyll"
