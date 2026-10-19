@@ -16,8 +16,13 @@ Do NOT include full copies of code that you fetched as part of your investigatio
 
 Every file committed to `main` is published to GitHub Pages at
 `https://drquicksilver.github.io/Research/<folder>/<path>` (the path is case-sensitive).
-The site index at https://drquicksilver.github.io/Research/ lists every folder and links to every
-`.html` file inside it, so an HTML file you commit is discoverable without further work.
+Your README.md is rendered as your project's page at `https://drquicksilver.github.io/Research/<folder>/`
+(other `.md` files such as notes.md become `<name>.html`, and relative links between them are fixed up),
+unless your folder has its own `index.html`, in which case the README goes to `readme.html`.
+The site index at https://drquicksilver.github.io/Research/ links to every project page and to every
+`.html` file in each folder, so an HTML file you commit is discoverable without further work.
+Link your artefacts from your README with relative links (e.g. `[demo](demo.html)`) so they work both on
+GitHub and on the project page.
 
 When an interactive demo, visualisation, playground or rich report would explain your findings
 better than Markdown alone, build it as an HTML file inside your folder:

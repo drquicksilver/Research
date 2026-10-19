@@ -34,7 +34,8 @@ These files are now at the repo root:
 ```
 .github/workflows/deploy-pages.yml   # build + deploy on push to main (and manual run)
 build-github-pages.sh                # hooks -> rsync to _site/ -> index.html -> .nojekyll
-render-pages-index.py                # stdlib-only index generator
+render-pages-site.py                 # renders each project's Markdown + the site index
+requirements-pages.txt               # pins the `markdown` package used above
 AGENTS.md                            # gains an "HTML artefacts and GitHub Pages" section
 .gitignore                           # ignores the local _site/ build output
 ```
@@ -46,8 +47,15 @@ removes the parts that need secrets or a bot pushing to `main`:
 
 - **No cog or LLM summaries.** The index generator reads each folder's README itself. It uses the first `#`
   heading as the title and the first paragraph as the summary, dates each project by the first commit of its
-  README, and links every `.html` file in the folder as a chip. It needs no API key, no dependencies and no
-  network access, and it never commits anything.
+  README, and links every `.html` file in the folder as a chip. It needs no API key and no network access,
+  and it never commits anything.
+- **Every project gets its own page on the site** (added after the first deploy, when the index turned out
+  to link only to GitHub). Simon's site renders only the root README. Here each folder's README.md is rendered
+  to `<folder>/index.html` (or `readme.html` if the folder has its own `index.html`), and its other `.md`
+  files to `<name>.html`, with relative links between them rewritten. Each page has a link back to the index
+  and one to the file on GitHub. Rendering uses [Python-Markdown](https://python-markdown.github.io/) (pinned in
+  `requirements-pages.txt`) with its tables/fenced-code extensions, rather than GitHub's Markdown API, so the
+  build makes no API calls and can be run and checked locally.
 - **The hook runner is folded into `build-github-pages.sh`.** The `github-pages.sh` convention is unchanged.
 - **The workflow has only `contents: read`,** because nothing writes back to the repo.
 - **The new AGENTS.md section** tells agents when to make an HTML artefact and how to make one that
@@ -80,5 +88,4 @@ Things to watch for:
 - **Everything in the repo becomes public on the web,** including notes and scripts. The repo is already public,
   so this exposes nothing new.
 - Optional extras, if you want them later: Simon's LLM summaries (add `requirements.txt` and the cog block, plus
-  an `OPENAI_API_KEY` secret and `contents: write`), or rendering each folder's README to `<folder>/index.html`
-  through the GitHub Markdown API, as `render-readme-index.py` does for his root page.
+  an `OPENAI_API_KEY` secret and `contents: write`).
