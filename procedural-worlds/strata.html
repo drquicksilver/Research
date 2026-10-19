@@ -1,0 +1,182 @@
+<!doctype html>
+<!--
+  STRATA — an endless, slow drift over flooded sedimentary mesa country at the edge of day.
+
+  Concept   Vast and quiet. Simple rules — warp, erode, quantise — make buttes, benches,
+            cliff bands and mirror-still floodwater that nobody placed by hand.
+  Technique One fragment shader raymarches a heightfield of integer-hashed value noise with
+            analytic derivatives. Low octaves are domain-warped and slope-damped (a cheap
+            erosion), then terraced with a soft step so the land breaks into mesas; the high
+            octaves are added after terracing so cliff faces and tabletops get their own
+            rubble. Rock colour comes from warped height bands (sediment layers), desert
+            varnish streaks on steep faces and dust on flats. Lighting: a low sun with soft
+            raymarched shadows, sky and bounce ambient, drifting cloud shadows, analytic height
+            fog with sun in-scatter, a sky with sheared cirrus, and floodwater that runs a
+            short reflection march. ACES tonemap, split-tone grade, vignette, dithering.
+            The sun slowly wanders through dusk and afternoon while the camera flies forward
+            forever, so the light and the land never repeat. Resolution adapts to frame time.
+  Controls  drag = look around · click / R = new world (seed lives in the URL hash)
+-->
+<html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>Strata</title>
+<style>html,body{margin:0;height:100%;background:#000;overflow:hidden}canvas{width:100%;height:100%;display:block;cursor:grab}
+#h{position:fixed;left:0;right:0;bottom:22px;text-align:center;font:12px system-ui,sans-serif;letter-spacing:.12em;color:#fff;opacity:.5;transition:opacity 3s;pointer-events:none;text-shadow:0 0 6px #000}</style></head>
+<body><canvas></canvas><div id=h>drag to look · click or R for a new world</div><script>
+const C=document.querySelector('canvas'),gl=C.getContext('webgl2',{antialias:false,alpha:false});
+function fail(m){document.body.innerHTML='<p style="color:#bbb;font:15px system-ui;padding:2em;max-width:40em">'+m+'</p>';throw Error(m)}
+if(!gl)fail('Strata needs WebGL2, which this browser or GPU does not provide.');
+setTimeout(()=>h.style.opacity=0,5000);
+function prog(f){const p=gl.createProgram();
+ for(const[t,s]of[[gl.VERTEX_SHADER,'void main(){gl_Position=vec4(vec2(gl_VertexID&1,gl_VertexID>>1)*4.-1.,0,1);}'],[gl.FRAGMENT_SHADER,f]]){
+  const x=gl.createShader(t);gl.shaderSource(x,'#version 300 es\nprecision highp float;precision highp int;\n'+s);gl.compileShader(x);
+  if(!gl.getShaderParameter(x,gl.COMPILE_STATUS))fail('Shader error: '+gl.getShaderInfoLog(x));gl.attachShader(p,x)}
+ gl.linkProgram(p);if(!gl.getProgramParameter(p,gl.LINK_STATUS))fail(gl.getProgramInfoLog(p));
+ p.u=n=>gl.getUniformLocation(p,n);return p}
+
+const P=prog(`
+uniform vec2 R,SUN,YP;uniform vec3 RO;uniform float T,F,FD;uniform ivec2 S;uniform vec4 Q;uniform vec3 C0,C1,C2;out vec4 o;
+vec3 sun,sunC,zen,hor;
+uint hs(uvec2 q){q=q*1664525u+1013904223u;q.x+=q.y*1664525u;q.y+=q.x*1664525u;q^=q>>16u;q.x+=q.y*1664525u;q.y+=q.x*1664525u;q^=q>>16u;return q.x^q.y;}
+float hf(vec2 i){return float(hs(uvec2(ivec2(i)+S)))*(2./4294967295.)-1.;}
+vec3 nd(vec2 x){vec2 i=floor(x),f=x-i,u=f*f*f*(f*(f*6.-15.)+10.),du=30.*f*f*(f*(f-2.)+1.);
+ float a=hf(i),b=hf(i+vec2(1,0)),c=hf(i+vec2(0,1)),d=hf(i+1.),m=a-b-c+d;
+ return vec3(a+(b-a)*u.x+(c-a)*u.y+m*u.x*u.y,du*(vec2(b-a,c-a)+m*u.yx));}
+const mat2 M=mat2(.8,.6,-.6,.8);
+float fbm(vec2 p,int n){float s=0.,a=.5;for(int i=0;i<n;i++){s+=a*nd(p).x;p=M*p*2.03;a*=.5;}return s;}
+// the land: warp -> eroded base -> terrace -> post-terrace detail
+float ter(vec2 x,int n){
+ vec2 p=x*.026;p+=Q.w*vec2(fbm(p*.4+3.1,2),fbm(p*.4-7.7,2));
+ float h=0.,a=.55;vec2 d=vec2(0);
+ for(int i=0;i<4;i++){vec3 q=nd(p);d+=q.yz;h+=a*q.x/(1.+.6*dot(d,d));p=M*p*2.02;a*=.5;}
+ float t=h*Q.x,f=floor(t);h=mix(h,(f+smoothstep(.5-Q.y,.5+Q.y,t-f))/Q.x,.93);
+ for(int i=4;i<n;i++){h+=a*.28*nd(p).x;p=M*p*2.02;a*=.5;}
+ return h*10.;}
+vec3 sky(vec3 rd){
+ float y=max(rd.y,0.),sd=max(dot(rd,sun),0.);
+ vec3 c=mix(hor,zen,pow(y,.42));
+ c+=sunC*(pow(sd,5.)*.3+pow(sd,48.)*.5);
+ if(rd.y>0.){vec2 q=rd.xz/(rd.y+.08)*.9+vec2(T*.006,T*.002);
+  float cl=smoothstep(.05,.7,fbm(q*vec2(1,3.)*M,5)+.2*Q.w)*smoothstep(0.,.3,rd.y);
+  c=mix(c,mix(hor*.95+.04,sunC*1.3+zen*.2,pow(sd,4.)),cl*.55);}
+ return c+sunC*smoothstep(.9994,.9998,sd)*12.;}
+vec3 fog(vec3 c,vec3 ro,vec3 rd,float t){
+ float b=.12,ry=abs(rd.y)<1e-4?1e-4:rd.y;
+ float f=1.-exp(-.008*FD/b*exp(-b*ro.y)*(1.-exp(-t*ry*b))/ry);
+ vec3 fc=mix(hor,sunC*1.1+hor*.2,pow(max(dot(rd,sun),0.),5.)*.85);
+ c=mix(c,hor*.9,1.-exp(-t*.0013));
+ return mix(c,fc,clamp(f,0.,1.));}
+vec3 nrm(vec2 p,float t){float e=.004+.0015*t;int n=t<50.?10:7;float h=ter(p,n);return normalize(vec3(h-ter(p+vec2(e,0),n),e,h-ter(p+vec2(0,e),n)));}
+float shd(vec3 p){float r=1.,t=.15;for(int i=0;i<36;i++){vec3 q=p+sun*t;float h=q.y-ter(q.xz,5);r=min(r,9.*h/t);if(r<.002||q.y>13.)break;t+=clamp(h*.45,.12,2.5);}return clamp(r,0.,1.);}
+vec3 alb(vec3 p,vec3 n){
+ float v=p.y*.55+fbm(p.xz*.05,3)*1.6+.15*nd(p.xz*.9).x,b=.5+.5*sin(v*3.1+sin(v*1.37)*1.8);
+ vec3 c=mix(C0,C1,b);
+ c=mix(c,C2,smoothstep(.75,.97,.5+.5*sin(v*7.7))*.65);
+ float st=smoothstep(.7,.25,n.y);
+ c*=1.-.45*st*smoothstep(-.1,.6,nd(vec2((p.x-p.z)*1.7,p.y*.22)).x);
+ float fl=smoothstep(.72,.95,n.y);
+ c=mix(c,mix(C1,vec3(.86,.77,.62),.5),fl*.4);
+ float wv=smoothstep(1.4,.1,p.y-Q.z)*fl*smoothstep(-.1,.4,nd(p.xz*1.9).x);
+ return mix(c,vec3(.2,.24,.13),wv*.7);}
+vec3 lit(vec3 p,vec3 n,vec3 al,bool s){
+ float sh=s?shd(p+n*.04):1.;
+ float cs=smoothstep(-.25,.45,fbm((p.xz+sun.xz/max(sun.y,.05)*7.)*.025+vec2(T*.006,T*.002),3));
+ float dif=max(dot(n,sun),0.)*sh*(.35+.65*cs);
+ float ao=clamp(1.+(p.y-ter(p.xz,3))*.2,.25,1.);
+ vec3 lin=sunC*dif*2.7+zen*(.55+.45*n.y)*.8*ao+hor*.3*ao*(1.-n.y)
+  +C0*sunC*.35*max(-dot(n,normalize(vec3(sun.x,0,sun.z))),0.)*ao;
+ return al*lin;}
+void main(){
+ vec2 uv=(2.*gl_FragCoord.xy-R)/R.y;
+ float e=SUN.x;sun=vec3(cos(e)*sin(SUN.y),sin(e),cos(e)*cos(SUN.y));
+ float k=smoothstep(.0,.38,e);
+ sunC=mix(vec3(1.,.33,.1),vec3(1.,.82,.62),k)*mix(.9,1.2,k);
+ zen=mix(vec3(.07,.09,.24),vec3(.14,.3,.62),k);
+ hor=mix(vec3(.9,.46,.32),vec3(.74,.76,.8),k);
+ vec3 ro=RO;float yw=YP.x,pt=YP.y;
+ vec3 fw=vec3(sin(yw)*cos(pt),sin(pt),cos(yw)*cos(pt)),rt=normalize(cross(vec3(0,1,0),fw)),up=cross(fw,rt);
+ vec3 rd=normalize(uv.x*rt+uv.y*up+1.7*fw);
+ float tw=rd.y<0.?(Q.z-ro.y)/rd.y:1e9,tm=min(260.,tw),t=.2;bool hit=false;
+ for(int i=0;i<220;i++){vec3 p=ro+rd*t;float h=p.y-ter(p.xz,t<70.?7:5);if(h<.0015*t){hit=true;break;}if(t>tm||p.y>13.&&rd.y>0.)break;t+=max(h*.42,.003*t);}
+ vec3 col;
+ if(hit){vec3 p=ro+rd*t,n=nrm(p.xz,t);col=fog(lit(p,n,alb(p,n),true),ro,rd,t);}
+ else if(tw<260.){
+  t=tw;vec3 p=ro+rd*t;
+  vec2 w=nd(p.xz*1.1+vec2(T*.13,0)).yz*.008+nd(p.xz*3.7-vec2(0,T*.21)).yz*.004;
+  vec3 n=normalize(vec3(w.x,1,w.y)),rr=reflect(rd,n),rc=sky(rr);
+  float u=.08;for(int i=0;i<80;i++){vec3 q=p+rr*u;float h=q.y-ter(q.xz,5);
+   if(h<.004*u){vec3 qn=nrm(q.xz,u+t);rc=fog(lit(q,qn,alb(q,qn),false),p,rr,u);break;}
+   if(q.y>13.||u>150.)break;u+=max(h*.45,.01*u);}
+  float dp=Q.z-ter(p.xz,5),fr=.025+.975*pow(1.-max(-dot(rd,n),0.),5.);
+  vec3 bed=mix(C1*sunC*.5*max(sun.y,.1)*2.+zen*.1,vec3(.01,.04,.05)+zen*.05,smoothstep(0.,1.5,dp));
+  col=mix(bed,rc,fr)+sunC*pow(max(dot(rr,sun),0.),500.)*6.*shd(p);
+  col=fog(col,ro,rd,t);
+ }else col=sky(rd);
+ col*=.82*F;
+ col=col*(2.51*col+.03)/(col*(2.43*col+.59)+.14);
+ col=pow(clamp(col,0.,1.),vec3(.4545));
+ col=mix(col,col*col*(3.-2.*col),.35);
+ float l=dot(col,vec3(.3,.59,.11));
+ col=mix(col,col*vec3(1.05,1.,.92)+vec3(-.01,.0,.035)*(1.-l),.6);
+ vec2 q=gl_FragCoord.xy/R;col*=.45+.55*pow(16.*q.x*q.y*(1.-q.x)*(1.-q.y),.18);
+ o=vec4(col+(float(hs(uvec2(gl_FragCoord.xy)+uint(T*60.)))/4294967295.-.5)/128.,1);}`);
+
+// offscreen target at adaptive resolution, upscaled by blit
+const fb=gl.createFramebuffer(),tx=gl.createTexture();const FX=+new URLSearchParams(location.search).get('s');let W,H,sc=FX||.5,ema=16,last=0,acc=0,fade=0,cnt=0;
+function size(){const d=Math.min(devicePixelRatio||1,2);W=C.width=innerWidth*d|0;H=C.height=innerHeight*d|0;
+ gl.bindTexture(gl.TEXTURE_2D,tx);gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA8,W,H,0,gl.RGBA,gl.UNSIGNED_BYTE,null);
+ gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR);
+ gl.bindFramebuffer(gl.FRAMEBUFFER,fb);gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,tx,0)}
+addEventListener('resize',size);size();
+
+const PAL=[[[.52,.24,.11],[.78,.5,.29],[.9,.74,.52]],[[.62,.42,.38],[.86,.76,.66],[.5,.3,.32]],
+ [[.2,.18,.18],[.5,.44,.4],[.68,.32,.18]],[[.58,.19,.09],[.9,.82,.68],[.36,.22,.18]],[[.45,.33,.22],[.7,.6,.45],[.8,.45,.3]]];
+let seed,W0;
+function rng(a){return()=>{a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296}}
+function world(s){seed=s??(Math.random()*1e9|0);history.replaceState(0,'','#'+seed);const r=rng(seed),j=()=>r()*.16-.08;
+ const pal=PAL[r()*PAL.length|0].map(c=>c.map(v=>Math.max(0,v+j())));
+ W0={S:[r()*2e5-1e5|0,r()*2e5-1e5|0],Q:[2.2+r()*2.4,.04+r()*.1,-4.5+r()*3.5,.3+r()*.6],FD:.35+r()*.7,pal,ph:r()*7,az:Math.PI/2+(r()-.5)*2.6};fade=0;cam=null}
+world(location.hash.length>1?+location.hash.slice(1):undefined);
+
+// CPU copy of the low-octave terrain (same hash and maths as the shader) for the camera
+function hs(x,y){x=Math.imul(x,1664525)+1013904223>>>0;y=Math.imul(y,1664525)+1013904223>>>0;x=x+Math.imul(y,1664525)>>>0;y=y+Math.imul(x,1664525)>>>0;
+ x^=x>>>16;y^=y>>>16;x=x+Math.imul(y,1664525)>>>0;y=y+Math.imul(x,1664525)>>>0;x^=x>>>16;y^=y>>>16;return(x^y)>>>0}
+const hf=(x,y)=>hs(x+W0.S[0]|0,y+W0.S[1]|0)*(2/4294967295)-1;
+function nd(x,y){const i=Math.floor(x),j=Math.floor(y),f=x-i,g=y-j,u=f*f*f*(f*(f*6-15)+10),v=g*g*g*(g*(g*6-15)+10),du=30*f*f*(f*(f-2)+1),dv=30*g*g*(g*(g-2)+1);
+ const a=hf(i,j),b=hf(i+1,j),c=hf(i,j+1),d=hf(i+1,j+1),m=a-b-c+d;return[a+(b-a)*u+(c-a)*v+m*u*v,du*(b-a+m*v),dv*(c-a+m*u)]}
+const rot=(x,y,k)=>[(.8*x-.6*y)*k,(.6*x+.8*y)*k];
+function fbm(x,y,n){let s=0,a=.5;for(let i=0;i<n;i++){s+=a*nd(x,y)[0];[x,y]=rot(x,y,2.03);a*=.5}return s}
+function ter(X,Z){let x=X*.026,y=Z*.026;const w=W0.Q[3],ox=fbm(x*.4+3.1,y*.4+3.1,2),oy=fbm(x*.4-7.7,y*.4-7.7,2);x+=w*ox;y+=w*oy;
+ let h=0,a=.55,dx=0,dy=0;for(let i=0;i<4;i++){const q=nd(x,y);dx+=q[1];dy+=q[2];h+=a*q[0]/(1+.6*(dx*dx+dy*dy));[x,y]=rot(x,y,2.02);a*=.5}
+ const k=W0.Q[0],t=h*k,f=Math.floor(t),e=Math.min(1,Math.max(0,(t-f-.5+W0.Q[1])/(2*W0.Q[1])));return 10*(h+((f+e*e*(3-2*e))/k-h)*.93)}
+const pth=s=>[s,22*Math.sin(s*.011)+9*Math.sin(s*.023+2)];
+// camera: follows a winding path, steers toward low ground, glides over obstacles
+var cam;function camReset(){const s=W0.ph*300,p=pth(s);cam={s,off:0,ov:0,y:Math.max(ter(...p)+3,W0.Q[2]+3.5),yaw:0,first:1}}
+function camStep(dt){const c=cam;c.s+=dt*1.6;const p=pth(c.s),q=pth(c.s+1),dl=Math.hypot(q[0]-p[0],q[1]-p[1]),n=[-(q[1]-p[1])/dl,(q[0]-p[0])/dl];
+ const at=(k,o)=>{const a=pth(c.s+k);return ter(a[0]+n[0]*o,a[1]+n[1]*o)};let g=0,top=-1e9;
+ for(const k of[6,14,26]){g+=(at(k,c.off+9)-at(k,c.off-9))/k;top=Math.max(top,at(k,c.off)-k*.06)}
+ c.ov=(c.ov-(g*1.2+c.off*.004)*dt)*Math.pow(.6,dt);c.off=Math.max(-40,Math.min(40,c.off+c.ov*dt));
+ const x=p[0]+n[0]*c.off,z=p[1]+n[1]*c.off,tg=Math.max(W0.Q[2]+3.2,top+2.6,ter(x,z)+2.2);
+ c.y+=(tg-c.y)*Math.min(1,dt*(tg>c.y?1.6:.35));
+ const yw=Math.atan2(x-(c.x??x-1),z-(c.z??z));c.yaw=c.first?yw:c.yaw+Math.atan2(Math.sin(yw-c.yaw),Math.cos(yw-c.yaw))*Math.min(1,dt*.7);
+ c.x=x;c.z=z;c.first=0}
+let lx=0,ly=0,tx2=0,ty2=0,drag=null;
+C.onpointerdown=e=>{drag={x:e.clientX,y:e.clientY,m:0};C.setPointerCapture(e.pointerId)};
+C.onpointermove=e=>{if(!drag)return;const dx=e.clientX-drag.x,dy=e.clientY-drag.y;drag.m+=Math.abs(dx)+Math.abs(dy);drag.x=e.clientX;drag.y=e.clientY;tx2-=dx*.004;ty2=Math.max(-.6,Math.min(.6,ty2-dy*.004))};
+C.onpointerup=e=>{if(drag&&drag.m<6)world();drag=null};
+onkeydown=e=>{if(e.key=='r'||e.key=='R')world()};
+
+function frame(now){requestAnimationFrame(frame);
+ const dt=Math.min(now-last,100);last=now;acc+=dt/1000;fade=Math.min(1,fade+dt/1500);
+ ema=ema*.95+dt*.05;if(!FX&&++cnt%10==0){if(ema>21&&sc>.22)sc*=.92;else if(ema<17.5&&sc<1)sc=Math.min(1,sc*1.04)}
+ if(!cam)camReset();camStep(dt/1000);
+ if(!drag){tx2*=.995;ty2*=.995}lx+=(tx2-lx)*.08;ly+=(ty2-ly)*.08;
+ const w=Math.max(64,W*sc|0),h=Math.max(36,H*sc|0),t=acc+W0.ph*100;
+ gl.bindFramebuffer(gl.FRAMEBUFFER,fb);gl.viewport(0,0,w,h);gl.useProgram(P);
+ gl.uniform2f(P.u('R'),w,h);gl.uniform1f(P.u('T'),acc);gl.uniform1f(P.u('F'),fade*fade);gl.uniform1f(P.u('FD'),W0.FD);
+ gl.uniform3f(P.u('RO'),cam.x,cam.y+.5*Math.sin(acc*.05),cam.z);gl.uniform2f(P.u('YP'),cam.yaw+.3*Math.sin(acc*.021)+lx,-.08+.05*Math.sin(acc*.033)+ly);gl.uniform2i(P.u('S'),...W0.S);gl.uniform4f(P.u('Q'),...W0.Q);
+ gl.uniform2f(P.u('SUN'),.03+.34*Math.pow(.5+.5*Math.sin(t*.0055),2.2),W0.az+.35*Math.sin(t*.0037));
+ ['C0','C1','C2'].forEach((k,i)=>gl.uniform3f(P.u(k),...W0.pal[i]));
+ gl.drawArrays(gl.TRIANGLES,0,3);
+ gl.bindFramebuffer(gl.READ_FRAMEBUFFER,fb);gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER,null);
+ gl.blitFramebuffer(0,0,w,h,0,0,W,H,gl.COLOR_BUFFER_BIT,gl.LINEAR);window.__fps=(1000/ema).toFixed(1)+' sc='+sc.toFixed(2)}
+requestAnimationFrame(frame);
+</script></body></html>

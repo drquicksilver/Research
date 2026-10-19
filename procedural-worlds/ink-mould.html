@@ -1,0 +1,163 @@
+<!doctype html>
+<!--
+  INK MOULD — three slime-mould colonies foraging across a sheet of handmade paper,
+  leaving indigo, vermilion and gold-leaf trails (palettes vary with the seed).
+
+  Concept   Intimate and teeming. Hundreds of thousands of agents each follow one rule —
+            sniff ahead-left, ahead and ahead-right, turn toward the strongest scent, step,
+            and drop a little ink. Veins, cells, lattices, travelling fronts and territories
+            emerge from that rule alone, at every scale from a single thread to the whole sheet.
+  Technique A GPU Physarum (Jones-style) agent model in WebGL2. Agents live in an RGBA32F
+            texture (position, heading, species) updated by a fragment shader; they deposit
+            by being drawn as one-pixel points with additive blending into an RGBA16F trail
+            map (one channel per species) that is then blurred and evaporated. Each species
+            senses a weighted mix of all three channels, so colonies attract, avoid or chase
+            one another. Every species' sensor angle, sensor reach, turn rate and stride drift
+            on incommensurate slow sine clocks, and so do the cross-species weights, so the
+            regime keeps shifting between networks, cells and spirals and the piece never loops.
+            The world is a torus that the view pans across seamlessly. Display: subtractive
+            ink layering with rim darkening over procedural fibrous paper, an embossed
+            metallic channel lit by a wandering lamp, vignette and grain.
+  Controls  move the mouse to shoo the mould · click / R = new culture (seed in URL hash)
+-->
+<html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>Ink Mould</title>
+<style>html,body{margin:0;height:100%;background:#eee6d6;overflow:hidden}canvas{width:100%;height:100%;display:block}
+#h{position:fixed;left:0;right:0;bottom:22px;text-align:center;font:12px system-ui,sans-serif;letter-spacing:.12em;color:#3a2a20;opacity:.55;transition:opacity 3s;pointer-events:none}</style></head>
+<body><canvas></canvas><div id=h>move to disturb · click or R for a new culture</div><script>
+const C=document.querySelector('canvas'),gl=C.getContext('webgl2',{antialias:false,alpha:false});
+function fail(m){document.body.innerHTML='<p style="color:#433;font:15px system-ui;padding:2em;max-width:40em">'+m+'</p>';throw Error(m)}
+if(!gl)fail('Ink Mould needs WebGL2, which this browser or GPU does not provide.');
+if(!gl.getExtension('EXT_color_buffer_float'))fail('Ink Mould needs floating-point render targets (EXT_color_buffer_float).');
+setTimeout(()=>h.style.opacity=0,5000);
+const FS='void main(){gl_Position=vec4(vec2(gl_VertexID&1,gl_VertexID>>1)*4.-1.,0,1);}',HS=
+`uint hs(uvec2 q){q=q*1664525u+1013904223u;q.x+=q.y*1664525u;q.y+=q.x*1664525u;q^=q>>16u;q.x+=q.y*1664525u;q.y+=q.x*1664525u;q^=q>>16u;return q.x^q.y;}
+float hf(vec2 i){return float(hs(uvec2(ivec2(i)+40000)))/4294967295.;}
+float vn(vec2 x){vec2 i=floor(x),f=x-i;f=f*f*(3.-2.*f);return mix(mix(hf(i),hf(i+vec2(1,0)),f.x),mix(hf(i+vec2(0,1)),hf(i+1.),f.x),f.y);}`;
+function prog(v,f){const p=gl.createProgram();
+ for(const[t,s]of[[gl.VERTEX_SHADER,v],[gl.FRAGMENT_SHADER,f]]){const x=gl.createShader(t);
+  gl.shaderSource(x,'#version 300 es\nprecision highp float;precision highp int;precision highp sampler2D;\n'+s);gl.compileShader(x);
+  if(!gl.getShaderParameter(x,gl.COMPILE_STATUS))fail('Shader error: '+gl.getShaderInfoLog(x));gl.attachShader(p,x)}
+ gl.linkProgram(p);if(!gl.getProgramParameter(p,gl.LINK_STATUS))fail(gl.getProgramInfoLog(p));
+ const c={};p.u=n=>c[n]??=gl.getUniformLocation(p,n);return p}
+
+// agents: sense three channels through a per-species weight vector, turn, step
+const PA=prog(FS,HS+`
+uniform sampler2D A,Tr;uniform float S;uniform uint F;uniform vec4 SP[3];uniform vec3 WM[3],MS;out vec4 o;vec3 w;
+float sn(vec2 p){vec2 d=p-MS.xy;d-=S*round(d/S);return dot(texture(Tr,p/S).rgb,w)-MS.z*exp(-dot(d,d)/(S*S*.0025));}
+void main(){vec4 a=texelFetch(A,ivec2(gl_FragCoord.xy),0);int s=int(a.w);vec4 p=SP[s];w=WM[s];
+ float c=sn(a.xy+p.y*vec2(cos(a.z),sin(a.z))),l=sn(a.xy+p.y*vec2(cos(a.z+p.x),sin(a.z+p.x))),r=sn(a.xy+p.y*vec2(cos(a.z-p.x),sin(a.z-p.x)));
+ float n=float(hs(uvec2(gl_FragCoord.xy)+uvec2(F,F*7u)))/4294967295.;
+ if(c<l&&c<r)a.z+=(n-.5)*2.*p.z;else if(l>c&&l>r)a.z+=p.z*(.5+.5*n);else if(r>c&&r>l)a.z-=p.z*(.5+.5*n);
+ a.z=mod(a.z+(n-.5)*.12,6.2831853);
+ a.xy=mod(a.xy+p.w*vec2(cos(a.z),sin(a.z)),S);o=a;}`);
+// deposit: every agent is a 1px additive point in its species channel
+const PD=prog(`uniform sampler2D A;uniform float S;uniform int N;uniform vec3 D;out vec3 c;
+void main(){vec4 a=texelFetch(A,ivec2(gl_VertexID%N,gl_VertexID/N),0);gl_Position=vec4(a.xy/S*2.-1.,0,1);gl_PointSize=1.;int s=int(a.w);c=vec3(s==0,s==1,s==2)*D;}`,
+ 'in vec3 c;out vec4 o;void main(){o=vec4(c,0);}');
+// diffuse + evaporate (toroidal 3x3)
+const PF=prog(FS,`uniform sampler2D Tr;uniform vec3 K;uniform float B;out vec4 o;
+void main(){ivec2 p=ivec2(gl_FragCoord.xy),z=textureSize(Tr,0);vec4 s=vec4(0);
+ for(int y=-1;y<=1;y++)for(int x=-1;x<=1;x++)s+=texelFetch(Tr,(p+ivec2(x,y)+z)%z,0);
+ o=vec4(mix(texelFetch(Tr,p,0).rgb,s.rgb/9.,B)*K,0);}`);
+// paper and ink
+const PV=prog(FS,HS+`
+uniform sampler2D Tr;uniform vec2 R,LG;uniform vec3 V,PP,I0,I1,I2;uniform float S,T,KD,FA;uniform int MT;out vec4 o;
+float fb(vec2 p){return .5*vn(p)+.25*vn(p*2.1+5.)+.125*vn(p*4.3+9.)+.0625*vn(p*8.7);}
+void main(){
+ vec2 sp=V.xy+(gl_FragCoord.xy-R*.5)*V.z,uv=sp/S,e=vec2(1.2/S,0);
+ vec3 c=texture(Tr,uv).rgb,gx=texture(Tr,uv+e).rgb-texture(Tr,uv-e).rgb,gy=texture(Tr,uv+e.yx).rgb-texture(Tr,uv-e.yx).rgb;
+ vec3 d=1.-exp(-c*KD);
+ // fibrous paper: cloudy formation + two crossed layers of stretched fibre noise + tooth
+ float pf=fb(sp*.012),fi=vn(mat2(.8,.6,-.6,.8)*sp*vec2(.05,.9))*vn(sp*vec2(.9,.04)+3.),tooth=vn(sp*.6)-.5;
+ vec3 col=PP*(.93+.07*pf-.05*smoothstep(.55,.9,fi)+.03*tooth);
+ vec3 lg=normalize(vec3(LG,1.1));
+ vec3 ink[3]=vec3[3](I0,I1,I2);
+ for(int i=0;i<3;i++){
+  float di=d[i],gm=length(vec2(gx[i],gy[i]))*KD*exp(-c[i]*KD),rim=smoothstep(.0,.6,gm);
+  if(i==MT){vec3 n=normalize(vec3(-gx[i],-gy[i],.12/KD));float df=max(dot(n,lg),0.),sv=pow(max(dot(reflect(-lg,n),vec3(0,0,1)),0.),24.);
+   vec3 m=ink[i]*(.35+.8*df)+vec3(1,.92,.75)*sv*.9;col=mix(col,m,smoothstep(.0,.6,di)*.96);}
+  else col*=mix(vec3(1),ink[i]*(1.-.45*rim)*(.9+.1*tooth),di);}
+ // emboss of all ink bodies against the lamp
+ vec2 gt=vec2(gx.r+gx.g+gx.b,gy.r+gy.g+gy.b)*KD*exp(-(c.r+c.g+c.b)*KD*.5);
+ col*=1.+.25*dot(normalize(vec3(-gt,.6)).xy,lg.xy)*min(length(gt),1.);
+ vec2 q=gl_FragCoord.xy/R;
+ col*=mix(.82,1.04,pow(16.*q.x*q.y*(1.-q.x)*(1.-q.y),.25))*(1.+.05*dot(q-.5,LG));
+ col=mix(PP*.98,col,FA);
+ o=vec4(pow(col,vec3(.97))+(float(hs(uvec2(gl_FragCoord.xy)+uint(T*997.)))/4294967295.-.5)/96.,1);}`);
+
+function tex(w,h,f,t,d,l){const x=gl.createTexture();gl.bindTexture(gl.TEXTURE_2D,x);gl.texImage2D(gl.TEXTURE_2D,0,f,w,h,0,gl.RGBA,t,d);
+ const m=l?gl.LINEAR:gl.NEAREST;gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,m);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,m);
+ gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.REPEAT);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.REPEAT);
+ x.f=gl.createFramebuffer();gl.bindFramebuffer(gl.FRAMEBUFFER,x.f);gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,x,0);return x}
+function rng(a){return()=>{a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296}}
+
+const PALS=[// paper, three inks, which ink is metal (-1 none)
+ [[.95,.91,.83],[.13,.2,.45],[.82,.24,.12],[.86,.66,.32],2],
+ [[.93,.89,.8],[.36,.21,.11],[.08,.08,.1],[.2,.52,.47],-1],
+ [[.91,.93,.9],[.06,.22,.36],[.76,.3,.42],[.84,.68,.38],2],
+ [[.94,.92,.85],[.27,.38,.16],[.45,.27,.15],[.82,.48,.32],2],
+ [[.96,.94,.9],[.1,.1,.12],[.75,.12,.1],[.62,.66,.7],2],
+ [[.92,.88,.86],[.35,.15,.4],[.9,.55,.15],[.15,.35,.55],-1]];
+let S,N,AG,TR,W,H,cfg,fr=0,acc=0,fade=0,seed,view=[0,0],ms=[0,0,0],lastMove=-1e9,spf=2,ema=16,last=0,cnt=0;
+function size(){const d=Math.min(devicePixelRatio||1,2);W=C.width=innerWidth*d|0;H=C.height=innerHeight*d|0}
+addEventListener('resize',size);size();
+
+function world(s){seed=s??(Math.random()*1e9|0);history.replaceState(0,'','#'+seed);const r=rng(seed),R=(a,b)=>a+(b-a)*r();
+ S=Math.min(1280,Math.max(512,Math.round(Math.max(W,H)*.75/64)*64));N=Math.round(S*.7);const k=S/1024;
+ const pal=PALS[r()*PALS.length|0],ord=[0,1,2].sort(()=>r()-.5);
+ cfg={pal,ord,k,
+  sp:[0,1,2].map(()=>[R(.3,.95),R(5,20)*k,R(.25,.75),R(.8,1.7)*k]),
+  wm:[0,1,2].map(i=>[0,1,2].map(j=>i==j?1:R(-1.3,.5))),
+  ph:Array.from({length:40},()=>r()*7),dk:[R(.8,.95),R(.8,.95),R(.8,.95)],dep:R(.6,1.2),blur:R(.3,1)};
+ // initial culture: scatter, inward discs, rings or separate colonies
+ const a=new Float32Array(N*N*4),mode=r()*4|0,cx=[0,1,2].map(()=>[r()*S,r()*S]);
+ for(let i=0;i<N*N;i++){const s=i%3,u=Math.random(),v=Math.random()*6.2832;let x,y,t;
+  if(mode==0){x=Math.random()*S;y=Math.random()*S;t=v}
+  else if(mode==1){const q=Math.sqrt(u)*S*.35;x=S/2+q*Math.cos(v);y=S/2+q*Math.sin(v);t=v+Math.PI}
+  else if(mode==2){const q=S*(.1+.13*s)+Math.random()*S*.03;x=S/2+q*Math.cos(v);y=S/2+q*Math.sin(v);t=Math.random()*6.2832}
+  else{const q=Math.sqrt(u)*S*.12;x=cx[s][0]+q*Math.cos(v);y=cx[s][1]+q*Math.sin(v);t=v}
+  a.set([(x%S+S)%S,(y%S+S)%S,t,s],i*4)}
+ AG=[tex(N,N,gl.RGBA32F,gl.FLOAT,a),tex(N,N,gl.RGBA32F,gl.FLOAT,null)];
+ TR=[tex(S,S,gl.RGBA16F,gl.HALF_FLOAT,null,1),tex(S,S,gl.RGBA16F,gl.HALF_FLOAT,null,1)];
+ for(const t of TR){gl.bindFramebuffer(gl.FRAMEBUFFER,t.f);gl.clearColor(0,0,0,0);gl.clear(gl.COLOR_BUFFER_BIT)}
+ view=[r()*S,r()*S];fade=0}
+world(location.hash.length>1?+location.hash.slice(1):undefined);
+
+const sw=(i,f)=>Math.sin(acc*f+cfg.ph[i%40]);
+function step(){const P=new Float32Array(12),M=new Float32Array(9);
+ for(let s=0;s<3;s++){const b=cfg.sp[s],i=s*5;
+  P.set([b[0]*(1+.45*sw(i,.031)),b[1]*(1+.55*sw(i+1,.023)),b[2]*(1+.4*sw(i+2,.017)),b[3]*(1+.3*sw(i+3,.027))],s*4);
+  for(let j=0;j<3;j++)M[s*3+j]=s==j?1:cfg.wm[s][j]+.6*sw(20+s*3+j,.011+.003*j)}
+ gl.bindFramebuffer(gl.FRAMEBUFFER,AG[1].f);gl.viewport(0,0,N,N);gl.useProgram(PA);
+ gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D,AG[0]);gl.activeTexture(gl.TEXTURE1);gl.bindTexture(gl.TEXTURE_2D,TR[0]);
+ gl.uniform1i(PA.u('A'),0);gl.uniform1i(PA.u('Tr'),1);gl.uniform1f(PA.u('S'),S);gl.uniform1ui(PA.u('F'),fr++);
+ gl.uniform4fv(PA.u('SP'),P);gl.uniform3fv(PA.u('WM'),M);gl.uniform3f(PA.u('MS'),...ms);
+ gl.drawArrays(gl.TRIANGLES,0,3);AG.reverse();
+ gl.bindFramebuffer(gl.FRAMEBUFFER,TR[0].f);gl.viewport(0,0,S,S);gl.useProgram(PD);
+ gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D,AG[0]);gl.uniform1i(PD.u('A'),0);gl.uniform1f(PD.u('S'),S);gl.uniform1i(PD.u('N'),N);
+ gl.uniform3f(PD.u('D'),cfg.dep,cfg.dep,cfg.dep);
+ gl.enable(gl.BLEND);gl.blendFunc(gl.ONE,gl.ONE);gl.drawArrays(gl.POINTS,0,N*N);gl.disable(gl.BLEND);
+ gl.bindFramebuffer(gl.FRAMEBUFFER,TR[1].f);gl.useProgram(PF);gl.bindTexture(gl.TEXTURE_2D,TR[0]);gl.uniform1i(PF.u('Tr'),0);
+ gl.uniform3f(PF.u('K'),...cfg.dk);gl.uniform1f(PF.u('B'),cfg.blur);gl.drawArrays(gl.TRIANGLES,0,3);TR.reverse()}
+
+let z=1;
+function toSim(x,y){const d=Math.min(devicePixelRatio||1,2);return[view[0]+(x*d-W/2)*z,view[1]+(H-y*d-H/2)*z]}
+C.onpointermove=e=>{const p=toSim(e.clientX,e.clientY);ms[0]=p[0];ms[1]=p[1];lastMove=acc};
+C.onpointerdown=()=>world();onkeydown=e=>{if(e.key=='r'||e.key=='R')world()};
+
+function frame(now){requestAnimationFrame(frame);
+ const dt=Math.min(now-last,100);last=now;acc+=dt/1000;fade=Math.min(1,fade+dt/2500);
+ ema=ema*.95+dt*.05;if(++cnt%30==0){if(ema>21&&spf>1)spf--;else if(ema<17.5&&spf<3)spf++}
+ ms[2]=8*Math.max(0,1-(acc-lastMove)/1.5);
+ for(let i=0;i<spf;i++)step();
+ const a=acc*.013+cfg.ph[39];view[0]+=Math.cos(a)*dt*.006*cfg.k;view[1]+=Math.sin(a*1.3)*dt*.006*cfg.k;
+ z=.82*S/Math.max(W,H)*(1+.08*Math.sin(acc*.021));
+ const [pp,i0,i1,i2,mt]=cfg.pal,I=[i0,i1,i2],o=cfg.ord;
+ gl.bindFramebuffer(gl.FRAMEBUFFER,null);gl.viewport(0,0,W,H);gl.useProgram(PV);gl.bindTexture(gl.TEXTURE_2D,TR[0]);
+ gl.uniform1i(PV.u('Tr'),0);gl.uniform2f(PV.u('R'),W,H);gl.uniform3f(PV.u('V'),view[0],view[1],z);gl.uniform1f(PV.u('S'),S);
+ gl.uniform1f(PV.u('T'),acc);gl.uniform1f(PV.u('KD'),.11/cfg.dep);gl.uniform1f(PV.u('FA'),fade);
+ gl.uniform2f(PV.u('LG'),Math.cos(acc*.07),Math.sin(acc*.05));gl.uniform3f(PV.u('PP'),...pp);
+ ['I0','I1','I2'].forEach((k,j)=>gl.uniform3f(PV.u(k),...I[o[j]]));gl.uniform1i(PV.u('MT'),o.indexOf(mt));
+ gl.drawArrays(gl.TRIANGLES,0,3);window.__fps=(1000/ema).toFixed(1)+' spf='+spf}
+requestAnimationFrame(frame);
+</script></body></html>
