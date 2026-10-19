@@ -1,0 +1,178 @@
+<!doctype html>
+<!--
+  STRANGE DUST — half a million motes falling forever through a chaotic map nobody has seen
+  before, condensing into luminous folded veils hanging in deep space.
+
+  Concept   Cosmic and contemplative. A single quadratic rule in three variables, iterated,
+            either explodes, settles, or — rarely — becomes chaotic and paints a strange
+            attractor: a fractal sheet folded at every scale. Each world searches for a fresh
+            one, so the forms are discovered rather than designed.
+  Technique The CPU searches random 30-coefficient quadratic 3D maps (Sprott's method):
+            it rejects orbits that escape or settle, keeps those with a positive Lyapunov
+            exponent, a genuinely 3D spread and a correlation dimension between ~1.3 and 2.5,
+            then seeds an orbit texture. On the GPU, 524k particles in an RGBA32F texture each
+            take one step of the map per frame; their positions are drawn as additive points
+            into a half-float buffer that decays rather than clears, integrating millions of
+            samples into a smooth density. Colour comes from each mote's local step length and
+            direction. Points blur with distance from the focal plane (energy-conserving depth
+            of field), bloom is taken from the buffer's mip chain, and a procedural nebula and
+            star field sit behind. Coefficients breathe slightly, and every minute or so a new
+            attractor is found and the dust migrates to it, so the piece never repeats.
+  Controls  drag = orbit · wheel = zoom · click / R = new sky (seed in URL hash)
+-->
+<html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>Strange Dust</title>
+<style>html,body{margin:0;height:100%;background:#000;overflow:hidden}canvas{width:100%;height:100%;display:block;cursor:grab}
+#h{position:fixed;left:0;right:0;bottom:22px;text-align:center;font:12px system-ui,sans-serif;letter-spacing:.12em;color:#fff;opacity:.45;transition:opacity 3s;pointer-events:none}</style></head>
+<body><canvas></canvas><div id=h>drag to orbit · wheel to zoom · click or R for a new sky</div><script>
+const C=document.querySelector('canvas'),gl=C.getContext('webgl2',{antialias:false,alpha:false});
+function fail(m){document.body.innerHTML='<p style="color:#bbb;font:15px system-ui;padding:2em;max-width:40em">'+m+'</p>';throw Error(m)}
+if(!gl)fail('Strange Dust needs WebGL2, which this browser or GPU does not provide.');
+if(!gl.getExtension('EXT_color_buffer_float'))fail('Strange Dust needs floating-point render targets (EXT_color_buffer_float).');
+setTimeout(()=>h.style.opacity=0,5000);
+const FS='void main(){gl_Position=vec4(vec2(gl_VertexID&1,gl_VertexID>>1)*4.-1.,0,1);}',
+ HS='uint hs(uint x){x^=x>>16;x*=0x7feb352du;x^=x>>15;x*=0x846ca68bu;return x^x>>16;}',
+ MAP=`vec3 mp(vec3 p,float a[30]){vec3 r;for(int k=0;k<3;k++){int o=k*10;
+  r[k]=a[o]+p.x*(a[o+1]+a[o+2]*p.x+a[o+3]*p.y+a[o+4]*p.z)+p.y*(a[o+5]+a[o+6]*p.y+a[o+7]*p.z)+p.z*(a[o+8]+a[o+9]*p.z);}return r;}`;
+function prog(v,f){const p=gl.createProgram();
+ for(const[t,s]of[[gl.VERTEX_SHADER,v],[gl.FRAGMENT_SHADER,f]]){const x=gl.createShader(t);
+  gl.shaderSource(x,'#version 300 es\nprecision highp float;precision highp int;precision highp sampler2D;\n'+s);gl.compileShader(x);
+  if(!gl.getShaderParameter(x,gl.COMPILE_STATUS))fail('Shader error: '+gl.getShaderInfoLog(x));gl.attachShader(p,x)}
+ gl.linkProgram(p);if(!gl.getProgramParameter(p,gl.LINK_STATUS))fail(gl.getProgramInfoLog(p));
+ const c={};p.u=n=>c[n]??=gl.getUniformLocation(p,n);return p}
+
+// one map step per particle; sign of w = which attractor (A/B), |w| = age
+const PU=prog(FS,HS+MAP+`
+uniform sampler2D P,SA,SB;uniform float A[30],B[30],MX;uniform uint F;out vec4 o;
+void main(){ivec2 q=ivec2(gl_FragCoord.xy);vec4 s=texelFetch(P,q,0);uint id=uint(q.x+q.y*4096);
+ bool g=float(hs(id*3u+1u))/4294967295.<MX,w=s.w<0.;float age=abs(s.w);vec3 p=s.xyz;
+ if(g==w){p=g?mp(p,B):mp(p,A);}
+ if(g!=w||!(dot(p,p)<1e8)){uint k=hs(id^F*2654435761u)&65535u;ivec2 c=ivec2(k&255u,k>>8);p=g?texelFetch(SB,c,0).xyz:texelFetch(SA,c,0).xyz;age=0.;}
+ o=vec4(p,(g?-1.:1.)*(age+1.));}`);
+// draw motes: depth-of-field point size with energy conservation; colour from local step
+const PR=prog(HS+MAP+`
+uniform sampler2D P;uniform float A[30],B[30],FO,AP,BR,PS;uniform vec4 NA,NB;uniform vec2 MS;uniform mat4 VP;uniform vec3 K0,K1,K2;out vec3 c;
+void main(){int i=gl_VertexID;vec4 s=texelFetch(P,ivec2(i&1023,i>>10),0);bool g=s.w<0.;vec4 n=g?NB:NA;
+ vec3 p=(s.xyz-n.xyz)*n.w,v=((g?mp(s.xyz,B):mp(s.xyz,A))-s.xyz)*n.w;
+ gl_Position=VP*vec4(p,1);float z=gl_Position.w,cc=PS+AP*abs(z-FO)/z;gl_PointSize=min(cc,16.);
+ float k=clamp(length(v)/(n.w*(g?MS.y:MS.x)*1.8),0.,1.);
+ c=mix(K0,K1,smoothstep(.15,.95,k));c=mix(c,K2,.75*smoothstep(.45,1.,dot(normalize(v),normalize(vec3(.3,1,.2))))*.8);
+ float j=float(hs(uint(i)))/4294967295.;
+ c*=BR*smoothstep(1.,12.,abs(s.w))*(.6+.8*j)/max(cc*cc/(PS*PS),1.);if(z<.05)gl_PointSize=0.;}`,
+ 'in vec3 c;out vec4 o;void main(){vec2 d=gl_PointCoord-.5;o=vec4(c*max(0.,1.-4.*dot(d,d))*2.,1);}');
+// auto exposure: density-weighted mean brightness over a coarse mip, eased over time
+const PE=prog(FS,`uniform sampler2D Ac;uniform int L;out vec4 o;
+void main(){ivec2 z=textureSize(Ac,L);float a=0.,b=0.;for(int y=0;y<32;y++)for(int x=0;x<32;x++){ivec2 q=ivec2(x,y)*z/32;float l=dot(texelFetch(Ac,q,L).rgb,vec3(.3,.5,.2));a+=l*l;b+=l;}
+ o=vec4(a/max(b,1e-6),0,0,.04);}`);
+const PK=prog(FS,'uniform float D;out vec4 o;void main(){o=vec4(0,0,0,D);}');
+const PV=prog(FS,`
+uniform sampler2D Ac,E;uniform vec2 R,FF;uniform vec3 CR,CU,CF,N0,N1;uniform float EX,T,FA;out vec4 o;
+uint hs(uvec3 q){q=q*1664525u+1013904223u;q.x+=q.y*q.z;q.y+=q.z*q.x;q.z+=q.x*q.y;q^=q>>16u;q.x+=q.y*q.z;q.y+=q.z*q.x;q.z+=q.x*q.y;return q.x;}
+float hf(vec3 i){return float(hs(uvec3(ivec3(i)+5000)))/4294967295.;}
+float vn(vec3 x){vec3 i=floor(x),f=x-i;f=f*f*(3.-2.*f);
+ return mix(mix(mix(hf(i),hf(i+vec3(1,0,0)),f.x),mix(hf(i+vec3(0,1,0)),hf(i+vec3(1,1,0)),f.x),f.y),
+            mix(mix(hf(i+vec3(0,0,1)),hf(i+vec3(1,0,1)),f.x),mix(hf(i+vec3(0,1,1)),hf(i+1.),f.x),f.y),f.z);}
+void main(){vec2 uv=gl_FragCoord.xy/R,nd=uv*2.-1.;
+ vec3 a=texture(Ac,uv).rgb,b=textureLod(Ac,uv,2.).rgb*.5;vec2 px=1./R;
+ for(int i=0;i<4;i++){vec2 d=vec2(i&1,i>>1)*2.-1.;b+=(textureLod(Ac,uv+d*px*12.,4.).rgb+textureLod(Ac,uv+d*px*48.,6.).rgb)*.1;}
+ vec3 x=(a+b*.6)*EX/max(texelFetch(E,ivec2(0),0).r,1e-4);float l=dot(x,vec3(.3,.5,.2)),t=1.-exp(-l);
+ vec3 col=x*t/max(l,1e-5);col=mix(col,vec3(t),smoothstep(.6,1.,t)*.5);
+ vec3 rd=normalize(CR*nd.x/FF.x+CU*nd.y/FF.y+CF);
+ float n=0.,w=.5;vec3 q=rd*2.3;for(int i=0;i<5;i++){n+=w*vn(q);q=q*2.1+3.;w*=.5;}
+ float m=vn(rd*1.3+9.);
+ vec3 bg=mix(vec3(.004,.005,.012),mix(N0,N1,m)*.07,smoothstep(.45,.95,n)*(.4+m));
+ vec3 sc=rd*300.,ci=floor(sc);float st=hf(ci+77.);
+ if(st>.9975){vec3 f=fract(sc)-.5;bg+=mix(vec3(1,.85,.7),vec3(.7,.8,1),hf(ci))*smoothstep(.25,0.,length(f))*(st-.9975)*400.*(.7+.3*sin(T*2.+st*99.));}
+ col+=bg*(1.-col);
+ col=pow(col,vec3(.9,.95,1.))*FA;
+ col*=.6+.4*pow(16.*uv.x*uv.y*(1.-uv.x)*(1.-uv.y),.2);
+ o=vec4(col+(hf(vec3(gl_FragCoord.xy,T*60.))-.5)/160.,1);}`);
+
+function tex(w,h,d,mip){const x=gl.createTexture();gl.bindTexture(gl.TEXTURE_2D,x);
+ if(mip){gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA16F,w,h,0,gl.RGBA,gl.HALF_FLOAT,null);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR_MIPMAP_LINEAR)}
+ else{gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA32F,w,h,0,gl.RGBA,gl.FLOAT,d);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.NEAREST)}
+ gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,mip?gl.LINEAR:gl.NEAREST);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);
+ x.f=gl.createFramebuffer();gl.bindFramebuffer(gl.FRAMEBUFFER,x.f);gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,x,0);return x}
+function rng(a){return()=>{a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296}}
+
+// --- attractor search -------------------------------------------------------------
+const F=(a,x,y,z)=>[0,10,20].map(o=>a[o]+x*(a[o+1]+a[o+2]*x+a[o+3]*y+a[o+4]*z)+y*(a[o+5]+a[o+6]*y+a[o+7]*z)+z*(a[o+8]+a[o+9]*z));
+function find(r){for(;;){const a=Array.from({length:30},()=>Math.round(r()*24-12)/10);
+ let p=[.05,.05,.05],q=[.05+1e-7,.05,.05],L=0,ok=1;const pts=[];
+ for(let i=0;i<7000&&ok;i++){p=F(a,...p);q=F(a,...q);const d=Math.hypot(q[0]-p[0],q[1]-p[1],q[2]-p[2]);
+  if(!(Math.abs(p[0])+Math.abs(p[1])+Math.abs(p[2])<1e4)||!(d>0))ok=0;
+  else{if(i>600)L+=Math.log(d/1e-7);q=p.map((v,k)=>v+(q[k]-v)/d*1e-7);if(i>1000)pts.push(p)}}
+ if(!ok||L/6400<.04)continue;
+ const m=[0,1,2].map(k=>pts.reduce((s,v)=>s+v[k],0)/pts.length),sd=[0,1,2].map(k=>Math.sqrt(pts.reduce((s,v)=>s+(v[k]-m[k])**2,0)/pts.length));
+ const smax=Math.max(...sd);if(Math.min(...sd)/smax<.18)continue;
+ // correlation dimension from pair counts at two radii
+ const smp=pts.filter((_,i)=>i%4==0);let n1=0,n2=0;const r1=.04*smax,r2=.4*smax;
+ for(let i=0;i<smp.length;i++)for(let j=i+1;j<smp.length;j++){const d=Math.hypot(smp[i][0]-smp[j][0],smp[i][1]-smp[j][1],smp[i][2]-smp[j][2]);if(d<r2){n2++;if(d<r1)n1++}}
+ const D=Math.log((n2+1)/(n1+1))/Math.log(10);if(D<1.3||D>2.5)continue;
+ const s=new Float32Array(65536*4);let ms=0;for(let i=0;i<65536;i++){const o=p;p=F(a,...p);if(!(Math.abs(p[0])<1e4))return find(r);ms+=Math.hypot(p[0]-o[0],p[1]-o[1],p[2]-o[2]);s.set(p,i*4)}
+ // centre on the median-ish mean and fit ~1.45 sigma into the unit ball
+ return{a,n:[...m,1/(1.45*smax)],ms:ms/65536,seed:tex(256,256,s)}}}
+
+// --- state ---------------------------------------------------------------------------
+const PAL=[[[.9,.25,.08],[1,.75,.4],[.35,.55,1]],[[.1,.55,.7],[.6,1,.8],[.8,.3,.9]],[[.7,.55,.3],[1,.95,.85],[.3,.5,.9]],
+ [[.8,.15,.4],[1,.7,.5],[.2,.8,.9]],[[.25,.3,.9],[.75,.85,1],[1,.6,.25]],[[.5,.9,.3],[1,1,.7],[.9,.3,.2]]];
+let W,H,AC,cur,next=null,mx=0,dir=0,side=0,seed,rnd,att=[null,null],pal,pal2,palMix=1,fr=0,acc=0,last=0,fade=0,ema=16,cnt=0,np=1<<19,tNext=0;
+let ph=.25,dist=3.4,uth=0,uph=0,zoom=1,drag=null;
+const ps=Array.from({length:60},()=>Math.random()*7);
+function size(){const d=Math.min(devicePixelRatio||1,2);W=C.width=innerWidth*d|0;H=C.height=innerHeight*d|0;if(AC){gl.deleteTexture(AC);gl.deleteFramebuffer(AC.f)}AC=tex(W,H,0,1)}
+addEventListener('resize',size);size();
+const EX=tex(1,1,0,1),PT=[tex(1024,512,new Float32Array(1024*512*4).fill(0)),tex(1024,512,null)];
+gl.bindFramebuffer(gl.FRAMEBUFFER,EX.f);gl.clearColor(.1,0,0,1);gl.clear(gl.COLOR_BUFFER_BIT);
+function newAttractor(){const at=find(rnd);const slot=side?0:1;if(att[slot])gl.deleteTexture(att[slot].seed);att[slot]=at;
+ if(!att[1-slot])att[1-slot]=at;dir=side?-1:1;side^=1;tNext=acc+50+rnd()*30;
+ pal2=PAL[rnd()*PAL.length|0];palMix=0}
+function world(s){seed=s??(Math.random()*1e9|0);history.replaceState(0,'','#'+seed);rnd=rng(seed);
+ if(!pal){pal=PAL[rnd()*PAL.length|0]}newAttractor()}
+world(location.hash.length>1?+location.hash.slice(1):undefined);
+
+C.onpointerdown=e=>{drag={x:e.clientX,y:e.clientY,m:0};C.setPointerCapture(e.pointerId)};
+C.onpointermove=e=>{if(!drag)return;const dx=e.clientX-drag.x,dy=e.clientY-drag.y;drag.m+=Math.abs(dx)+Math.abs(dy);drag.x=e.clientX;drag.y=e.clientY;uth-=dx*.006;uph=Math.max(-1.2,Math.min(1.2,uph+dy*.006))};
+C.onpointerup=()=>{if(drag&&drag.m<6)world();drag=null};
+C.onwheel=e=>{zoom=Math.max(.45,Math.min(2.2,zoom*Math.exp(e.deltaY*.001)))};
+onkeydown=e=>{if(e.key=='r'||e.key=='R')world()};
+
+const lerp=(a,b,t)=>a.map((v,i)=>v+(b[i]-v)*t),norm=v=>{const l=Math.hypot(...v);return v.map(x=>x/l)},
+ cross=(a,b)=>[a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]],dot=(a,b)=>a[0]*b[0]+a[1]*b[1]+a[2]*b[2];
+function coef(at,o){return new Float32Array(at.a.map((v,i)=>v+.004*Math.sin(acc*(.05+.04*ps[i%60])+ps[(i+o)%60])))}
+function frame(now){requestAnimationFrame(frame);
+ const dt=Math.min(now-last,100);last=now;acc+=dt/1000;fade=Math.min(1,fade+dt/3000);fr++;
+ ema=ema*.95+dt*.05;if(++cnt%30==0){if(ema>21&&np>1<<17)np>>=1;else if(ema<17&&np<1<<19)np<<=1}
+ if(acc>tNext)newAttractor();
+ mx=Math.max(0,Math.min(1,mx+dir*dt/9000));palMix=Math.min(1,palMix+dt/9000);if(palMix>=1&&pal2){pal=pal2;pal2=null}
+ const K=pal2?pal.map((c,i)=>lerp(c,pal2[i],palMix*palMix*(3-2*palMix))):pal,cA=coef(att[0],0),cB=coef(att[1],7);
+ // update
+ gl.bindFramebuffer(gl.FRAMEBUFFER,PT[1].f);gl.viewport(0,0,1024,512);gl.useProgram(PU);
+ gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D,PT[0]);gl.activeTexture(gl.TEXTURE1);gl.bindTexture(gl.TEXTURE_2D,att[0].seed);
+ gl.activeTexture(gl.TEXTURE2);gl.bindTexture(gl.TEXTURE_2D,att[1].seed);
+ gl.uniform1i(PU.u('P'),0);gl.uniform1i(PU.u('SA'),1);gl.uniform1i(PU.u('SB'),2);gl.uniform1fv(PU.u('A'),cA);gl.uniform1fv(PU.u('B'),cB);
+ gl.uniform1f(PU.u('MX'),mx);gl.uniform1ui(PU.u('F'),fr);gl.drawArrays(gl.TRIANGLES,0,3);PT.reverse();
+ // camera: slow orbit + breathing distance, user offsets eased
+ const a=acc*.045+uth,b=.3*Math.sin(acc*.017)+ph+uph,d=dist*zoom*(1+.12*Math.sin(acc*.011));
+ const e=[d*Math.cos(b)*Math.sin(a),d*Math.sin(b),d*Math.cos(b)*Math.cos(a)],f=norm(e.map(v=>-v)),r=norm(cross(f,[0,1,0])),u=cross(r,f);
+ const fy=1/Math.tan(.42),fx=fy*H/W,n=.05,fa=60,A=(fa+n)/(n-fa),B=2*fa*n/(n-fa);
+ const rows=[[...r.map(v=>v*fx),-fx*dot(r,e)],[...u.map(v=>v*fy),-fy*dot(u,e)],[...f.map(v=>-v*A),A*dot(f,e)+B],[...f,-dot(f,e)]];
+ const VP=new Float32Array(16);for(let i=0;i<4;i++)for(let j=0;j<4;j++)VP[j*4+i]=rows[i][j];
+ // accumulate: fade previous frames, then add motes
+ gl.bindFramebuffer(gl.FRAMEBUFFER,AC.f);gl.viewport(0,0,W,H);gl.enable(gl.BLEND);
+ gl.useProgram(PK);gl.uniform1f(PK.u('D'),.86);gl.blendFunc(gl.ZERO,gl.SRC_ALPHA);gl.drawArrays(gl.TRIANGLES,0,3);
+ gl.useProgram(PR);gl.blendFunc(gl.ONE,gl.ONE);gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D,PT[0]);gl.uniform1i(PR.u('P'),0);
+ gl.uniform1fv(PR.u('A'),cA);gl.uniform1fv(PR.u('B'),cB);gl.uniform4f(PR.u('NA'),...att[0].n);gl.uniform4f(PR.u('NB'),...att[1].n);gl.uniform2f(PR.u('MS'),att[0].ms,att[1].ms);
+ gl.uniformMatrix4fv(PR.u('VP'),false,VP);gl.uniform1f(PR.u('FO'),d);gl.uniform1f(PR.u('AP'),H*.012);
+ const dp=Math.min(devicePixelRatio||1,2);gl.uniform1f(PR.u('PS'),1.1*dp);gl.uniform1f(PR.u('BR'),.025*W*H/np/(dp*dp*1.21));
+ ['K0','K1','K2'].forEach((k,i)=>gl.uniform3f(PR.u(k),...K[i]));
+ gl.drawArrays(gl.POINTS,0,np);gl.disable(gl.BLEND);
+ gl.bindTexture(gl.TEXTURE_2D,AC);gl.generateMipmap(gl.TEXTURE_2D);
+ gl.bindFramebuffer(gl.FRAMEBUFFER,EX.f);gl.viewport(0,0,1,1);gl.useProgram(PE);gl.uniform1i(PE.u('Ac'),0);gl.uniform1i(PE.u('L'),Math.max(0,Math.log2(Math.max(W,H)/40)|0));
+ gl.enable(gl.BLEND);gl.blendFunc(gl.SRC_ALPHA,gl.ONE_MINUS_SRC_ALPHA);gl.drawArrays(gl.TRIANGLES,0,3);gl.disable(gl.BLEND);
+ gl.activeTexture(gl.TEXTURE1);gl.bindTexture(gl.TEXTURE_2D,EX);gl.activeTexture(gl.TEXTURE0);gl.viewport(0,0,W,H);
+ // display
+ gl.bindFramebuffer(gl.FRAMEBUFFER,null);gl.useProgram(PV);gl.uniform1i(PV.u('Ac'),0);gl.uniform1i(PV.u('E'),1);gl.uniform2f(PV.u('R'),W,H);gl.uniform2f(PV.u('FF'),fx,fy);
+ gl.uniform3f(PV.u('CR'),...r);gl.uniform3f(PV.u('CU'),...u);gl.uniform3f(PV.u('CF'),...f);gl.uniform3f(PV.u('N0'),...K[0]);gl.uniform3f(PV.u('N1'),...K[2]);
+ gl.uniform1f(PV.u('EX'),.55);gl.uniform1f(PV.u('T'),acc);gl.uniform1f(PV.u('FA'),fade);gl.drawArrays(gl.TRIANGLES,0,3);
+ window.__fps=(1000/ema).toFixed(1)+' np='+np}
+requestAnimationFrame(frame);
+</script></body></html>
