@@ -44,3 +44,9 @@
 
 ## Testing
 - Ran the proposed build script locally against a copy of the repo with the proposed files dropped in (see README).
+
+## Installation
+- User asked for the files to be installed at the repo root and a PR opened. Moved them out of `proposed/`
+  to their real paths, added a `.gitignore` for `_site/`, and re-ran the build from the root.
+- Merging before enabling Pages makes the first deploy fail (Pages not configured); the README says to
+  re-run the workflow by hand after switching the source to "GitHub Actions".

@@ -27,19 +27,19 @@ What this means:
   exits 0, so one broken folder cannot block the deploy for everything else.
 - Pages only updates from `main`, so artefacts go live when a PR is merged, not while it is open.
 
-## The version proposed for this repo
+## The setup installed in this repo
 
-Everything is in [`proposed/`](proposed/), laid out at the paths it should have in the repo root:
+These files are now at the repo root:
 
 ```
-proposed/
-  .github/workflows/deploy-pages.yml   # build + deploy on push to main (and manual run)
-  build-github-pages.sh                # hooks -> rsync to _site/ -> index.html -> .nojekyll
-  render-pages-index.py                # stdlib-only index generator
-  AGENTS.md                            # current AGENTS.md + an "HTML artefacts and GitHub Pages" section
+.github/workflows/deploy-pages.yml   # build + deploy on push to main (and manual run)
+build-github-pages.sh                # hooks -> rsync to _site/ -> index.html -> .nojekyll
+render-pages-index.py                # stdlib-only index generator
+AGENTS.md                            # gains an "HTML artefacts and GitHub Pages" section
+.gitignore                           # ignores the local _site/ build output
 ```
 
-[`AGENTS.md.diff`](AGENTS.md.diff) shows exactly what is added to AGENTS.md.
+[`AGENTS.md.diff`](AGENTS.md.diff) shows exactly what was added to AGENTS.md.
 
 It keeps Simon's design (workflow → build script → per-folder hooks → copy the repo → index) and
 removes the parts that need secrets or a bot pushing to `main`:
@@ -56,7 +56,7 @@ removes the parts that need secrets or a bot pushing to `main`:
 
 ### Tested
 
-I copied the proposed files into a clone of this repo and ran `bash build-github-pages.sh`. The resulting
+From the repo root I ran `bash build-github-pages.sh`. The resulting
 `_site/index.html` lists both existing projects, with correct titles, summaries and GitHub README links. It also
 links `2d-rigid-physics-js/dist/sequential-impulses.html` and `dist/xpbd.html`, which are already self-contained
 demos. Once installed they will be live at:
@@ -64,12 +64,13 @@ demos. Once installed they will be live at:
 - https://drquicksilver.github.io/Research/2d-rigid-physics-js/dist/sequential-impulses.html
 - https://drquicksilver.github.io/Research/2d-rigid-physics-js/dist/xpbd.html
 
-## To install
+## To turn it on
 
-1. From the repo root: `cp -r github-pages-setup/proposed/. .`, then commit to `main` (directly or by PR).
-2. On GitHub, go to **Settings → Pages → Build and deployment → Source** and choose **GitHub Actions**. This is the
-   one manual step. The repo is public, so Pages is free.
-3. The first push to `main` (or **Actions → Deploy GitHub Pages → Run workflow**) publishes
+1. Merge the PR that adds these files.
+2. On GitHub, go to **Settings → Pages → Build and deployment → Source** and choose **GitHub Actions**.
+   The repo is public, so Pages is free.
+3. Publish: go to **Actions → Deploy GitHub Pages → Run workflow** (the merge's own run may have failed if it
+   started before step 2; after that every push to `main` deploys automatically). The site appears at
    https://drquicksilver.github.io/Research/.
 
 Things to watch for:
